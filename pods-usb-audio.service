@@ -1,0 +1,26 @@
+[Unit]
+Description=pods-head-tracker: USB game audio -> AirPods A2DP forwarder
+# The gadget unit provides the capture card; bluealsa provides the A2DP
+# source PCM the samples are written to.
+After=pods-usb-gadget.service bluealsa.service bluetooth.target
+Wants=bluealsa.service
+# Never give up restarting -- AirPods spend most of their life in the case,
+# and every failed connect attempt is one restart.
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Reuses AIRPODS_MAC (plus the optional AUDIO_* knobs) from the same
+# config as the bridge. Deliberately not "EnvironmentFile=-": a missing
+# config should fail loudly in the journal, not run half-configured.
+EnvironmentFile=/etc/pods-head-tracker.conf
+# Head-tracking-only escape hatch: AUDIO_ENABLE=0 in the config skips the
+# start cleanly (unit stays inactive, no restart loop; tracking untouched).
+# The $$ keeps systemd from eating the ${...:-...} shell expansion.
+ExecCondition=/bin/sh -c '[ "$${AUDIO_ENABLE:-1}" != "0" ]'
+ExecStart=/usr/local/bin/pods-usb-audio.sh
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

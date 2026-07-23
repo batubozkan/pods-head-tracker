@@ -5,6 +5,11 @@ Description=pods-head-tracker: AirPods -> OpenTrack head-tracking bridge
 # buds are in range / in-ear.
 After=bluetooth.target network-online.target
 Wants=bluetooth.target network-online.target
+# Ordering-only, on purpose: on USB-audio installs the composite gadget
+# creates /dev/ttyGS0, so start after it. On serial-only (g_serial) installs
+# no such unit exists and this line is inert -- and the bridge re-opens the
+# port every second anyway, so it's a nicety, not a requirement.
+After=pods-usb-gadget.service
 # Never give up restarting (default rate-limiting would stop it after a few
 # fast failures, e.g. AirPods not yet reachable at boot).
 StartLimitIntervalSec=0

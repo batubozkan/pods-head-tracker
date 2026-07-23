@@ -9,6 +9,14 @@ set -euo pipefail
 
 [ "$(id -u)" -eq 0 ] || { echo "run with sudo" >&2; exit 1; }
 
+# The USB-audio setup (setup-usb-audio.sh) replaces g_serial with a composite
+# gadget; re-adding g_serial here would steal the USB device controller at
+# boot and kill both serial AND audio.
+if systemctl is-enabled pods-usb-gadget.service &> /dev/null; then
+    echo "composite gadget already installed (setup-usb-audio.sh) - this script would break it" >&2
+    exit 1
+fi
+
 # Bookworm keeps config.txt in /boot/firmware; older releases in /boot.
 BOOTDIR=/boot/firmware
 [ -f "$BOOTDIR/config.txt" ] || BOOTDIR=/boot

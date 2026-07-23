@@ -64,7 +64,13 @@ def connect_l2cap(mac):
         except OSError as e:
             last = e
             s.close()
-            time.sleep(1.5)
+            # errno 112 (Host is down) = we paged, nobody answered: the buds
+            # are in the case. Back off hard -- every page is ~5 s of owning
+            # the shared 2.4 GHz radio, and a tight retry loop starves Wi-Fi
+            # (SSH dies while the buds are away). Reconnect stays fast:
+            # AirPods leaving the case page their bonded hosts themselves,
+            # so the next attempt rides that link without paging at all.
+            time.sleep(10.0 if e.errno == 112 else 1.5)
     raise SystemExit(f"could not open L2CAP channel: {last}")
 
 

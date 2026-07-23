@@ -55,6 +55,9 @@ shipped with Raspberry Pi OS.
 | `pods-head-tracker.conf.example` | Config template — your AirPods MAC, transport choice, PC IP. Copy to `/etc/pods-head-tracker.conf` on the Pi. |
 | `pods-head-tracker.service` | systemd unit — runs the bridge on boot, restarts on failure. Generic; all settings come from the config file. |
 | `setup-usb-serial.sh` | One-shot script that turns the Pi Zero into a USB serial gadget for the USB transport. |
+| `setup-usb-audio.sh` | One-shot script that adds **USB audio**: hear the game through the AirPods over the same USB cable. Installs the four files below. |
+| `pods-usb-gadget.sh` / `.service` | Boot-time script + unit that build the composite USB gadget (serial **+** sound card) that replaces `g_serial` when USB audio is installed. |
+| `pods-usb-audio.sh` / `.service` | Forwarder + unit that pump the USB audio into the AirPods over Bluetooth A2DP (BlueALSA). |
 
 ## Setup
 
@@ -74,7 +77,8 @@ bluetoothctl scan on                  # wait for "<MAC> AirPods", then: scan off
 bluetoothctl pair <AIRPODS_MAC>
 bluetoothctl trust <AIRPODS_MAC>
 # The follow-up "connect" failing with br-connection-profile-unavailable is
-# EXPECTED (that's the unused audio profile) — the AACP channel still works.
+# EXPECTED (that's the audio profile, unused unless you install USB audio —
+# after setup-usb-audio.sh it should succeed) — the AACP channel still works.
 ```
 
 Verify: `sudo grep -c LinkKey /var/lib/bluetooth/<ADAPTER>/<AIRPODS_MAC>/info`
@@ -89,7 +93,9 @@ root-only dirs).
 
 ```bash
 scp opentrack_bridge.py airpods_ht_probe.py pods-head-tracker.conf.example \
-    pods-head-tracker.service setup-usb-serial.sh pi@<PI_HOST>:~/
+    pods-head-tracker.service setup-usb-serial.sh setup-usb-audio.sh \
+    pods-usb-gadget.sh pods-usb-gadget.service \
+    pods-usb-audio.sh pods-usb-audio.service pi@<PI_HOST>:~/
 ```
 
 ### 3. Create your config
@@ -165,6 +171,70 @@ compare or keep a fallback.
 Note: `dr_mode=peripheral` means that USB port can no longer *host* devices
 (keyboards, hubs) — it's dedicated to the gadget role.
 
+## USB audio: hear the game through the AirPods (optional)
+
+Since the AirPods are already on your head and already talking to the Pi,
+the same setup can carry game audio: the Pi shows up on the PC as a **USB
+sound card** next to the COM port, and everything Windows plays into it is
+forwarded to the AirPods over Bluetooth (A2DP). One cable, one pair of buds,
+head tracking and audio together. Playback only — the AirPods' microphone is
+not bridged.
+
+On the Pi (once, after the files from step 2 are on it):
+
+```bash
+chmod +x setup-usb-audio.sh
+sudo ./setup-usb-audio.sh
+sudo reboot
+```
+
+This **replaces** the `g_serial` gadget with a composite one (serial **+**
+audio, built at boot by `pods-usb-gadget.service`). The serial transport is
+unchanged — still `/dev/ttyGS0`, config untouched — but don't run
+`setup-usb-serial.sh` afterwards; it would undo the composite (it refuses,
+with an explanation, if you try). You don't need to have run it before
+either: `setup-usb-audio.sh` works on a fresh Pi.
+
+Then on Windows:
+
+1. Device Manager re-enumerates the gadget as a new device: the COM port
+   gets a **new number** — re-select it once in OpenTrack's Hatire settings
+   — and an **"AirPods Bridge"** playback device appears in Settings →
+   System → Sound (driver is inbox on Windows 10/11, nothing to install).
+2. Set "AirPods Bridge" as the default output — or route only the game to it
+   via Settings → System → Sound → Advanced → App volume and device
+   preferences.
+
+What to expect:
+
+- **Latency is Bluetooth-audio latency**, roughly 150–300 ms end to end:
+  fine for immersion, engine noise, and music; not for competitive audio
+  cues. Tune with `AUDIO_LATENCY_MS` in the config (lower = snappier,
+  higher = fewer dropouts). The shipped default of **50** is conservative;
+  **20** ran clean on the tested Pi Zero 2 W with tracking active, and is
+  a good target. Going lower buys nothing audible — the AirPods' own
+  ~150 ms sink buffer dominates the total either way.
+- Codec is SBC (what Debian's BlueALSA ships). Audio pauses when the buds go
+  in the case and resumes on its own when they come out — same retry loop as
+  the tracking service.
+- **Loudness** is your normal Windows volume slider (it scales the USB
+  stream). The buds' own Bluetooth ceiling is set once per connection from
+  `AUDIO_VOLUME` (default 70 of 127) — the forwarder sets it explicitly
+  because a never-used A2DP source can otherwise sit at volume zero and
+  play "healthy" silence.
+- With audio on, prefer `TRANSPORT=serial` over `both`: Wi-Fi and Bluetooth
+  share the Pi's antenna, and an idle Wi-Fi keeps the air clear for A2DP.
+
+**Head tracking only, audio off:** if you never run `setup-usb-audio.sh`,
+none of this exists and tracking works as before. If you installed audio
+and want it off temporarily, set `AUDIO_ENABLE=0` in the config and
+`sudo systemctl restart pods-usb-audio` — the audio service goes idle,
+tracking is untouched. Set it back to `1` (or delete the line) to re-enable.
+
+Troubleshooting: `systemctl status pods-usb-gadget pods-usb-audio bluealsa`,
+`arecord -l` (the sound card is `UAC2Gadget`), and
+`sudo journalctl -u pods-usb-audio -f` while it retries.
+
 ## Daily use
 
 Power the Pi, put the AirPods in your ears — the service connects on its own
@@ -189,6 +259,9 @@ sudo journalctl -u pods-head-tracker -f         # live log
 - **Missing config**: if `/etc/pods-head-tracker.conf` doesn't exist the
   service fails immediately with a clear message in `systemctl status` —
   that's deliberate.
+- **Choppy tracking only while audio plays** (USB audio installed): tracking
+  and audio share one Bluetooth link. Raise `AUDIO_LATENCY_MS`, and use
+  `TRANSPORT=serial` so Wi-Fi stays off the shared antenna.
 
 ## Known limitations
 

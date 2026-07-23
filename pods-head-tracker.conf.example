@@ -22,6 +22,20 @@ UDP_PORT=4242
 # USB gadget serial device, created by setup-usb-serial.sh. Leave as-is.
 SERIAL_DEV=/dev/ttyGS0
 
+# --- USB audio (optional; installed by setup-usb-audio.sh) ---
+# The audio forwarder reuses AIRPODS_MAC above -- nothing extra is required.
+# 0 = head tracking only: the audio services stay installed but idle.
+# Apply with: sudo systemctl restart pods-usb-audio
+#AUDIO_ENABLE=1
+# Loop latency in milliseconds: lower = snappier audio, higher = fewer
+# dropouts. 50 is the safe default; 20 tested clean on a Pi Zero 2 W with
+# tracking active. Apply with: sudo systemctl restart pods-usb-audio
+#AUDIO_LATENCY_MS=50
+
+# The buds' Bluetooth volume ceiling, 0-127. Day-to-day loudness is the
+# normal Windows volume slider; raise this only if audio feels capped.
+#AUDIO_VOLUME=70
+
 # Re-zero the neutral ("facing forward") pose every N seconds (0 = only when
 # the connection opens; re-center anytime with: systemctl restart).
 RECALIBRATE_SECS=0

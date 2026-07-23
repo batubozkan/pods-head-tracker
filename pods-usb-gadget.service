@@ -1,0 +1,16 @@
+[Unit]
+Description=pods-head-tracker: USB composite gadget (ACM serial + UAC2 audio)
+# The gadget tree lives in configfs, so that mount must exist first.
+After=sys-kernel-config.mount
+
+[Service]
+# oneshot + RemainAfterExit: the gadget is kernel state, not a process.
+# "active" means "built and bound to the UDC"; stopping the unit tears the
+# gadget down (which unplugs the device from the PC's point of view).
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/bin/pods-usb-gadget.sh start
+ExecStop=/usr/local/bin/pods-usb-gadget.sh stop
+
+[Install]
+WantedBy=multi-user.target
