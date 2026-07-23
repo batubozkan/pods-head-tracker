@@ -1,0 +1,27 @@
+[Unit]
+Description=pods-head-tracker: AirPods -> OpenTrack head-tracking bridge
+# Wait for Bluetooth and the network before starting; the bridge itself
+# retries the AirPods connection, so an early start just loops until the
+# buds are in range / in-ear.
+After=bluetooth.target network-online.target
+Wants=bluetooth.target network-online.target
+# Never give up restarting (default rate-limiting would stop it after a few
+# fast failures, e.g. AirPods not yet reachable at boot).
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# Needs root for the raw AF_BLUETOOTH L2CAP socket + BT_SECURITY.
+User=root
+# All settings (AirPods MAC, transport, PC IP, ...) live in
+# /etc/pods-head-tracker.conf -- copy the shipped .example there and edit
+# it; never edit this unit. Deliberately not "EnvironmentFile=-": a missing
+# config should fail the unit with a clear journal message, not start the
+# bridge half-configured.
+EnvironmentFile=/etc/pods-head-tracker.conf
+ExecStart=/usr/bin/python3 /usr/local/bin/opentrack_bridge.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

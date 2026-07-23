@@ -1,0 +1,30 @@
+# pods-head-tracker configuration.
+#
+# Copy this file to the Pi as /etc/pods-head-tracker.conf and edit it:
+#   sudo install -m 644 pods-head-tracker.conf.example /etc/pods-head-tracker.conf
+#   sudo nano /etc/pods-head-tracker.conf
+# The systemd service reads it on start; apply changes with:
+#   sudo systemctl restart pods-head-tracker
+
+# Your AirPods' Bluetooth *Classic* MAC -- the address you paired in
+# bluetoothctl (not the LE address).
+AIRPODS_MAC=XX:XX:XX:XX:XX:XX
+
+# How tracking data reaches the PC: udp (Wi-Fi), serial (USB cable), or both.
+TRANSPORT=udp
+
+# --- udp transport (OpenTrack input: "FreePIE UDP receiver") ---
+# Your PC's LAN IP and OpenTrack's listen port.
+UDP_HOST=192.0.2.10
+UDP_PORT=4242
+
+# --- serial transport (OpenTrack input: "Hatire Arduino") ---
+# USB gadget serial device, created by setup-usb-serial.sh. Leave as-is.
+SERIAL_DEV=/dev/ttyGS0
+
+# Re-zero the neutral ("facing forward") pose every N seconds (0 = only when
+# the connection opens; re-center anytime with: systemctl restart).
+RECALIBRATE_SECS=0
+
+# 1 = log every sample (noisy; debugging only).
+VERBOSE=0

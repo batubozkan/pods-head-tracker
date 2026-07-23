@@ -1,0 +1,15 @@
+# Private notes -- never published.
+docs/
+CLAUDE.md
+
+# Local filled-in config (only the .example is tracked).
+pods-head-tracker.conf
+
+__pycache__/
+*.pyc
+.venv/
+venv/
+.vscode/
+.idea/
+Thumbs.db
+.DS_Store
