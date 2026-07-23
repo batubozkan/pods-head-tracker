@@ -12,6 +12,8 @@ orientation to pitch/yaw, and forwards it to OpenTrack — over **Wi-Fi (UDP)**
 or a **USB cable**. It runs as a boot-time service, so you just
 power the Pi and wear the AirPods.
 
+https://github.com/user-attachments/assets/617cd9a7-1b34-467b-9f04-5ade3d9c7e3e
+
 ## Why a Raspberry Pi (and not just Windows)?
 
 Windows has **no user-mode API for Bluetooth Classic L2CAP** — the transport
