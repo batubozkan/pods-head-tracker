@@ -54,6 +54,7 @@ shipped with Raspberry Pi OS.
 | `airpods_ht_probe.py` | Diagnostic: connect, start head tracking, print/decode the raw sensor packets. |
 | `pods-head-tracker.conf.example` | Config template — your AirPods MAC, transport choice, PC IP. Copy to `/etc/pods-head-tracker.conf` on the Pi. |
 | `pods-head-tracker.service` | systemd unit — runs the bridge on boot, restarts on failure. Generic; all settings come from the config file. |
+| `install.sh` | Installer/updater for the three rows above: copies the bridge and unit into place, creates the config from the template on first run, enables and (re)starts the service once it's configured. |
 | `setup-usb-serial.sh` | One-shot script that turns the Pi Zero into a USB serial gadget for the USB transport. |
 | `setup-usb-audio.sh` | One-shot script that adds **USB audio**: hear the game through the AirPods over the same USB cable. Installs the four files below. |
 | `pods-usb-gadget.sh` / `.service` | Boot-time script + unit that build the composite USB gadget (serial **+** sound card) that replaces `g_serial` when USB audio is installed. |
@@ -92,38 +93,28 @@ root-only dirs).
 ### 2. Deploy to the Pi
 
 ```bash
-scp opentrack_bridge.py airpods_ht_probe.py pods-head-tracker.conf.example \
-    pods-head-tracker.service setup-usb-serial.sh setup-usb-audio.sh \
-    pods-usb-gadget.sh pods-usb-gadget.service \
-    pods-usb-audio.sh pods-usb-audio.service pi@<PI_HOST>:~/
+scp *.py *.sh *.service *.conf.example pi@<PI_HOST>:~/
 ```
 
-### 3. Create your config
+### 3. Install the bridge (config + service)
 
 On the Pi:
 
 ```bash
-sudo install -m 644 pods-head-tracker.conf.example /etc/pods-head-tracker.conf
+chmod +x install.sh
+sudo ./install.sh                       # installs, creates the config
 sudo nano /etc/pods-head-tracker.conf   # set AIRPODS_MAC, TRANSPORT, UDP_HOST
+sudo ./install.sh                       # run again: enables + starts
 ```
 
 The config file is the only thing you personalize — the service unit is
-generic and never needs editing.
+generic and never needs editing, and the bridge lives in `/usr/local/bin`,
+so nothing depends on your username or home directory. Updating later is
+re-running `sudo ./install.sh` — it never overwrites your config. (Prefer
+typing the steps yourself? `install.sh` is just the obvious
+`install`/`systemctl` commands in the right order — read it.)
 
-### 4. Install the bridge and the service
-
-```bash
-sudo install -m 755 opentrack_bridge.py /usr/local/bin/
-sudo install -m 644 pods-head-tracker.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now pods-head-tracker
-```
-
-The bridge lives in `/usr/local/bin`, so nothing depends on your username or
-home directory. When updating to a newer version later, just re-run the
-first command and restart the service.
-
-### 5. Pick a transport
+### 4. Pick a transport
 
 #### Option A — Wi-Fi UDP (zero cables)
 
