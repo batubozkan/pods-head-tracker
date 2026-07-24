@@ -1,9 +1,11 @@
 [Unit]
 Description=pods-head-tracker: USB game audio -> AirPods A2DP forwarder
 # The gadget unit provides the capture card; bluealsa provides the A2DP
-# source PCM the samples are written to.
-After=pods-usb-gadget.service bluealsa.service bluetooth.target
-Wants=bluealsa.service
+# source PCM the samples are written to. Both bluealsa unit names are
+# listed (the upstream rename to bluealsad); systemd ignores whichever
+# one isn't installed.
+After=pods-usb-gadget.service bluealsa.service bluealsad.service bluetooth.target
+Wants=bluealsa.service bluealsad.service
 # Never give up restarting -- AirPods spend most of their life in the case,
 # and every failed connect attempt is one restart.
 StartLimitIntervalSec=0
