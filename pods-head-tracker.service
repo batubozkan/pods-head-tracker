@@ -27,6 +27,12 @@ EnvironmentFile=/etc/pods-head-tracker.conf
 ExecStart=/usr/bin/python3 /usr/local/bin/opentrack_bridge.py
 Restart=always
 RestartSec=5
+# Cheap sandboxing: the bridge only reads /usr and writes /dev/ttyGS0 plus
+# its sockets, so lock the rest down. Deliberately conservative -- e.g. no
+# PrivateDevices, which would hide the gadget port.
+NoNewPrivileges=yes
+ProtectHome=yes
+ProtectSystem=full
 
 [Install]
 WantedBy=multi-user.target
