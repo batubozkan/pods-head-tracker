@@ -146,6 +146,15 @@ class UdpOutput(_Output):
     """
 
     def __init__(self, host, port):
+        # Resolve a hostname once here instead of letting sendto() re-resolve
+        # it on every frame (dozens of lookups per second on a Pi Zero). If
+        # resolution fails now -- DNS not up yet at boot -- keep the name and
+        # let the per-send warning path handle it as before.
+        try:
+            host = socket.getaddrinfo(host, port, socket.AF_INET,
+                                      socket.SOCK_DGRAM)[0][4][0]
+        except OSError:
+            pass
         self.dest = (host, port)
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -338,13 +347,18 @@ if __name__ == "__main__":
                     default=env_num("RECALIBRATE_SECS", "0", float),
                     help="periodically re-zero the neutral pose (0 = never) [env RECALIBRATE_SECS]")
     ap.add_argument("--verbose", action="store_true",
-                    default=env("VERBOSE", "0").lower() in ("1", "true", "yes", "on"))
+                    help="log every sample [env VERBOSE]")
+    ap.add_argument("--no-verbose", dest="verbose", action="store_false",
+                    help="override VERBOSE=1 from the config")
+    ap.set_defaults(verbose=env("VERBOSE", "0").lower() in ("1", "true", "yes", "on"))
     a = ap.parse_args()
 
     # Validated by hand, not argparse choices=, so bad values coming from the
     # config file (which bypass argparse) get the same clear error.
     if a.transport not in ("udp", "serial", "both"):
         ap.error(f"invalid transport {a.transport!r} - use udp, serial, or both")
+    if not 1 <= a.port <= 65535:
+        ap.error(f"invalid UDP_PORT {a.port} - must be 1-65535")
     if not a.mac:
         ap.error("AirPods MAC not set - pass it on the command line or set "
                  "AIRPODS_MAC in /etc/pods-head-tracker.conf")

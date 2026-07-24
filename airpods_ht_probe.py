@@ -101,7 +101,7 @@ def run(mac, variant, burst, seconds):
                     print(f"HT  h={h:6d} v={v:6d}   o=({o1:6d},{o2:6d},{o3:6d})   [{ht_count} total]",
                           flush=True)
             else:
-                op = p[4] if len(p) > 5 else -1
+                op = p[4] if len(p) > 5 else None
                 if op == 0x06 and len(p) >= 8:  # ear detection
                     st = p[6:8].hex()
                     if st not in ear_seen:
@@ -110,7 +110,8 @@ def run(mac, variant, burst, seconds):
                 elif len(p) > 90:
                     print(f"  big non-HT packet ({len(p)}B): {p[:20].hex()}...", flush=True)
                 else:
-                    print(f"  rx op=0x{op:02x} ({len(p)}B): {p.hex()}", flush=True)
+                    desc = f"op=0x{op:02x}" if op is not None else "runt"
+                    print(f"  rx {desc} ({len(p)}B): {p.hex()}", flush=True)
         if ht_count:
             break
     s.close()
