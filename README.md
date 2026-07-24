@@ -239,8 +239,10 @@ Troubleshooting: `systemctl status pods-usb-gadget pods-usb-audio bluealsa`,
 
 Power the Pi, put the AirPods in your ears — the service connects on its own
 and starts streaming within a few seconds. It calibrates the neutral
-("forward") pose from the first ~2 seconds of each connection, so face forward
-and hold still briefly when it (re)connects. To re-center:
+("forward") pose right after each connection: face forward and hold still
+for a moment — a still head calibrates in a fraction of a second, and
+samples captured while moving are discarded and retried automatically
+(watch for `calibrated` in the journal). To re-center:
 `sudo systemctl restart pods-head-tracker`.
 
 ```bash

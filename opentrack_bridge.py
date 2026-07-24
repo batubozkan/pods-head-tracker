@@ -9,6 +9,7 @@ import argparse
 import math
 import os
 import socket
+import statistics
 import struct
 import sys
 import time
@@ -29,10 +30,13 @@ START_ALT = bytes([0x04, 0x00, 0x04, 0x00, 0x17, 0x00, 0x00, 0x00, 0x10, 0x00,
 HT_PREFIX = bytes([0x04, 0x00, 0x04, 0x00, 0x17, 0x00, 0x00, 0x00, 0x10, 0x00])
 
 # --- Orientation -> yaw/pitch (ported from LibrePods HeadOrientation.kt) -----
-# Neutral ("facing forward") pose = mean of the first CALIB_N samples after
-# connect, so hold still facing forward for the first ~0.5 s.
+# Neutral ("facing forward") pose: median of CALIB_N consecutive samples
+# taken while the head is still (see Calibrator), captured right after each
+# connect -- face forward and hold still until "calibrated" is logged.
 CALIB_N = 10
-FULL_SCALE = 32000.0  # raw orientation units mapped to 180 degrees
+CALIB_STILL_MAX = 800  # max batch spread (raw units, ~4.5 deg) to count as still
+CALIB_MAX_TRIES = 6    # batches discarded for movement before accepting anyway
+FULL_SCALE = 32000.0   # raw orientation units mapped to 180 degrees
 
 # --- OpenTrack "Hatire Arduino" frame (serial transport) ---------------------
 # 30 bytes little-endian: {uint16 0xAAAA; uint16 counter 0-999; float32
@@ -55,6 +59,41 @@ def wrap_s16(d):
     that seam would otherwise turn a small head move into a ~360 deg jump.
     Identity for in-range differences."""
     return (d + 32768.0) % 65536.0 - 32768.0
+
+
+class Calibrator:
+    """Neutral-pose capture: the median of CALIB_N consecutive samples taken
+    while the head is still.
+
+    A batch that spreads more than CALIB_STILL_MAX (the head was moving) is
+    discarded and collection restarts -- at most CALIB_MAX_TRIES times, then
+    the next batch is accepted regardless, so a fidgety start can only delay
+    tracking, never block it. Samples are folded into wrap-safe deltas from
+    the batch's first sample and reduced by median, so one outlier or a raw
+    origin near the +/-32768 seam can't skew the result."""
+
+    def __init__(self):
+        self.ref = None
+        self.samples = []
+        self.tries = 0
+
+    def feed(self, o2, o3):
+        """Add one sample; returns the neutral (o2, o3) pair once captured."""
+        if self.ref is None:
+            self.ref = (o2, o3)
+        self.samples.append((wrap_s16(o2 - self.ref[0]),
+                             wrap_s16(o3 - self.ref[1])))
+        if len(self.samples) < CALIB_N:
+            return None
+        axes = list(zip(*self.samples))
+        spread = max(max(a) - min(a) for a in axes)
+        if spread > CALIB_STILL_MAX and self.tries < CALIB_MAX_TRIES:
+            self.tries += 1
+            self.ref, self.samples = None, []
+            print("moving during calibration - retrying (face forward, hold still)",
+                  flush=True)
+            return None
+        return tuple(r + statistics.median(a) for r, a in zip(self.ref, axes))
 
 
 def is_ht(p):
@@ -200,7 +239,7 @@ def run(mac, output, recalib_secs, verbose):
     while True:
         s = connect_l2cap(mac)
         print("L2CAP open -> streaming pitch/yaw", flush=True)
-        calib, neutral, last_calib = [], None, time.monotonic()
+        calib, neutral, last_calib = Calibrator(), None, time.monotonic()
         idle = 0
         try:
             # Inside the reconnect guard: the link can drop this early too
@@ -227,23 +266,25 @@ def run(mac, output, recalib_secs, verbose):
                 idle = 0
                 if not is_ht(p):
                     continue
-                o1, o2, o3 = s16(p, 43), s16(p, 45), s16(p, 47)
+                # Orientation triple sits at offsets 43/45/47; only the two
+                # combined axes at 45/47 enter the pitch/yaw math.
+                o2, o3 = s16(p, 45), s16(p, 47)
 
                 if neutral is None:
-                    calib.append((o1, o2, o3))
-                    if len(calib) >= CALIB_N:
-                        neutral = tuple(sum(c[i] for c in calib) / len(calib) for i in range(3))
-                        print(f"calibrated neutral={tuple(round(x) for x in neutral)}", flush=True)
+                    neutral = calib.feed(o2, o3)
+                    if neutral is not None:
+                        print(f"calibrated neutral=({neutral[0]:.0f}, {neutral[1]:.0f})",
+                              flush=True)
                     continue
 
                 # Optional periodic recalibration (drift correction).
                 if recalib_secs and (time.monotonic() - last_calib) >= recalib_secs:
-                    neutral, calib, last_calib = None, [], time.monotonic()
+                    neutral, calib, last_calib = None, Calibrator(), time.monotonic()
                     print("recalibrating - hold still, face forward", flush=True)
                     continue
 
-                o2n = wrap_s16(o2 - neutral[1])
-                o3n = wrap_s16(o3 - neutral[2])
+                o2n = wrap_s16(o2 - neutral[0])
+                o3n = wrap_s16(o3 - neutral[1])
                 pitch = (o2n + o3n) / 2 / FULL_SCALE * 180.0  # degrees
                 yaw = (o2n - o3n) / 2 / FULL_SCALE * 180.0
                 output.send(yaw, pitch, 0.0)  # roll not derived
