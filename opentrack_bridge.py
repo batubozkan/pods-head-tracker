@@ -190,13 +190,16 @@ def run(mac, output, recalib_secs, verbose):
     while True:
         s = connect_l2cap(mac)
         print("L2CAP open -> streaming pitch/yaw", flush=True)
-        s.send(HANDSHAKE)
-        time.sleep(0.3)
-        s.send(START_ALT)
-        s.settimeout(2)
         calib, neutral, last_calib = [], None, time.monotonic()
         idle = 0
         try:
+            # Inside the reconnect guard: the link can drop this early too
+            # (buds straight back into the case), and that has to loop back
+            # to a reconnect, not escape as an unhandled OSError.
+            s.send(HANDSHAKE)
+            time.sleep(0.3)
+            s.send(START_ALT)
+            s.settimeout(2)
             while True:
                 try:
                     p = s.recv(2048)
