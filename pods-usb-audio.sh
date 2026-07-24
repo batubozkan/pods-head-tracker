@@ -54,9 +54,21 @@ for _ in $(seq 10); do
     bluealsa-cli info "$PCM" > /dev/null 2>&1 && break
     sleep 1
 done
+# Validate the ceiling here rather than passing garbage through: a rejected
+# bluealsa-cli call would leave the buds at whatever volume they had --
+# possibly zero, which is exactly the silent failure this block prevents.
 VOL="${AUDIO_VOLUME:-70}"
-bluealsa-cli soft-volume "$PCM" false 2>/dev/null || true
-bluealsa-cli volume "$PCM" "$VOL" "$VOL" 2>/dev/null || true
+case $VOL in
+    ''|*[!0-9]*) echo "invalid AUDIO_VOLUME='$VOL' (want 0-127) - using 70" >&2; VOL=70 ;;
+esac
+if [ "$VOL" -gt 127 ]; then
+    echo "AUDIO_VOLUME=$VOL out of range (0-127) - using 127" >&2
+    VOL=127
+fi
+bluealsa-cli soft-volume "$PCM" false \
+    || echo "could not switch $PCM to absolute volume - buds may stay quiet/silent" >&2
+bluealsa-cli volume "$PCM" "$VOL" "$VOL" \
+    || echo "could not set the buds' volume ceiling to $VOL" >&2
 
 # The two ends tick on independent clocks (Windows' USB clock vs the
 # AirPods' sink clock); -S 1 lets alsaloop rate-adjust instead of drifting
@@ -75,10 +87,20 @@ alsaloop \
     -r 48000 -f S16_LE -c 2 \
     -t $((LATENCY_MS * 1000)) -S 1 2>&1 | {
     n=0
+    win_start=0
     while IFS= read -r line; do
         printf '%s\n' "$line"
         case $line in
         *underrun*)
+            # Count underruns inside a rolling 30 s window: only a dense
+            # burst means the capture path is starved (the wart above).
+            # Sporadic ones over an hours-long session are normal and must
+            # not accumulate into a pointless mid-game restart.
+            now=$(date +%s)
+            if [ $((now - win_start)) -gt 30 ]; then
+                n=0
+                win_start=$now
+            fi
             n=$((n + 1))
             if [ "$n" -ge 8 ]; then
                 echo "sustained underruns - reopening the capture path" >&2
