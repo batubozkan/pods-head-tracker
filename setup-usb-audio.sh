@@ -68,12 +68,18 @@ systemctl disable --now serial-getty@ttyGS0.service 2>/dev/null || true
 
 # We only SEND audio to the AirPods. The packaged bluealsa default also
 # registers a2dp-sink (the Pi advertising itself as a speaker), which we
-# never use -- restrict the daemon to the source profile. The binary is
-# probed because bluez-alsa renamed it (bluealsa -> bluealsad) upstream.
+# never use -- restrict the daemon to the source profile. Both the binary
+# and the systemd unit are probed because bluez-alsa renamed them upstream
+# (bluealsa -> bluealsad); newer Debian packages ship the new names.
 BLUEALSA_BIN=$(command -v bluealsad || command -v bluealsa) \
     || { echo "bluealsa daemon not found after install?" >&2; exit 1; }
-mkdir -p /etc/systemd/system/bluealsa.service.d
-cat > /etc/systemd/system/bluealsa.service.d/pods-head-tracker.conf <<EOF
+BLUEALSA_UNIT=""
+for u in bluealsa.service bluealsad.service; do
+    if systemctl cat "$u" > /dev/null 2>&1; then BLUEALSA_UNIT=$u; break; fi
+done
+[ -n "$BLUEALSA_UNIT" ] || { echo "bluealsa systemd unit not found after install?" >&2; exit 1; }
+mkdir -p "/etc/systemd/system/${BLUEALSA_UNIT}.d"
+cat > "/etc/systemd/system/${BLUEALSA_UNIT}.d/pods-head-tracker.conf" <<EOF
 # pods-head-tracker: A2DP source only (we send audio to the buds, never
 # receive). Written by setup-usb-audio.sh.
 [Service]
@@ -84,7 +90,7 @@ EOF
 install -m 755 "$SRC/pods-usb-gadget.sh" "$SRC/pods-usb-audio.sh" /usr/local/bin/
 install -m 644 "$SRC/pods-usb-gadget.service" "$SRC/pods-usb-audio.service" /etc/systemd/system/
 systemctl daemon-reload
-systemctl enable pods-usb-gadget.service bluealsa.service pods-usb-audio.service
+systemctl enable pods-usb-gadget.service "$BLUEALSA_UNIT" pods-usb-audio.service
 
 cat <<'EOF'
 
