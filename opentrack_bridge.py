@@ -47,6 +47,16 @@ def s16(p, off):
     return struct.unpack_from("<h", p, off)[0]
 
 
+def wrap_s16(d):
+    """Wrap a difference of two int16 readings back into [-32768, 32768).
+
+    The raw orientation values live on a 16-bit circle (FULL_SCALE 32000 =
+    180 deg, so the seam sits at ~184 deg). A neutral pose calibrated near
+    that seam would otherwise turn a small head move into a ~360 deg jump.
+    Identity for in-range differences."""
+    return (d + 32768.0) % 65536.0 - 32768.0
+
+
 def is_ht(p):
     return len(p) >= 70 and p[:10] == HT_PREFIX and p[10] in (0x44, 0x45) and p[11] == 0
 
@@ -232,8 +242,8 @@ def run(mac, output, recalib_secs, verbose):
                     print("recalibrating - hold still, face forward", flush=True)
                     continue
 
-                o2n = o2 - neutral[1]
-                o3n = o3 - neutral[2]
+                o2n = wrap_s16(o2 - neutral[1])
+                o3n = wrap_s16(o3 - neutral[2])
                 pitch = (o2n + o3n) / 2 / FULL_SCALE * 180.0  # degrees
                 yaw = (o2n - o3n) / 2 / FULL_SCALE * 180.0
                 output.send(yaw, pitch, 0.0)  # roll not derived
