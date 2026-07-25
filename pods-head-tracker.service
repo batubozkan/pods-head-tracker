@@ -33,6 +33,11 @@ RestartSec=5
 NoNewPrivileges=yes
 ProtectHome=yes
 ProtectSystem=full
+# Let the bridge publish a live "Status:" line (state + AirPods battery)
+# via sd_notify. Type stays "simple" on purpose: STATUS= needs only this
+# access grant, and startup semantics stay unchanged. If sandboxing ever
+# grows RestrictAddressFamilies, it must include AF_UNIX for this.
+NotifyAccess=main
 
 [Install]
 WantedBy=multi-user.target

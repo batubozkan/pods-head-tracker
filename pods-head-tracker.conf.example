@@ -52,5 +52,12 @@ RECALIBRATE_SECS=0
 # the Send box). Matched as raw bytes in the serial stream; empty = off.
 #RECENTER_CMD=RECENTER
 
+# --- battery reporting (journal + systemctl status) ---
+# Re-log the battery every N seconds even if unchanged (changes always log;
+# 0 = changes only).
+#BATTERY_LOG_SECS=900
+# Warn when a bud discharges to this percentage (0 = never).
+#BATTERY_WARN_PCT=20
+
 # 1 = log every sample (noisy; debugging only).
 VERBOSE=0

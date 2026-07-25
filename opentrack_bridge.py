@@ -2,7 +2,10 @@
 """AirPods -> OpenTrack head-tracking bridge (runs on the Raspberry Pi).
 
 Streams the AirPods' head orientation over Bluetooth and forwards yaw/pitch
-to OpenTrack on the PC over Wi-Fi UDP and/or USB serial. Setup: README.md.
+to OpenTrack on the PC over Wi-Fi UDP and/or USB serial. Also reports the
+buds' battery in the journal and the unit's systemd status line, and
+re-centers on demand (SIGUSR1, or a token OpenTrack sends over the serial
+port). Setup: README.md.
 """
 
 import argparse
@@ -29,6 +32,17 @@ START_ALT = bytes([0x04, 0x00, 0x04, 0x00, 0x17, 0x00, 0x00, 0x00, 0x10, 0x00,
                    0x0F, 0x00, 0x08, 0x73, 0x42, 0x0B, 0x08, 0x10, 0x10, 0x02,
                    0x1A, 0x05, 0x01, 0x40, 0x9C, 0x00, 0x00])
 HT_PREFIX = bytes([0x04, 0x00, 0x04, 0x00, 0x17, 0x00, 0x00, 0x00, 0x10, 0x00])
+
+# Battery / ear-status notifications (formats from LibrePods). The buds push
+# them on the same L2CAP channel once REQUEST_NOTIFICATIONS is sent (any time
+# after the handshake). They differ from head tracking at byte 4 -- the AACP
+# opcode (0x04 battery, 0x06 ear, 0x17 head tracking) -- so is_ht() never
+# matches them and vice versa.
+REQUEST_NOTIFICATIONS = bytes.fromhex("040004000f00ffffffff")
+BATTERY_PREFIX = bytes.fromhex("040004000400")
+EAR_PREFIX = bytes.fromhex("040004000600")
+BATTERY_COMPONENTS = {0x01: "headset", 0x02: "R", 0x04: "L", 0x08: "case"}
+BATTERY_STATUSES = {0x01: "charging", 0x02: "discharging", 0x04: "disconnected"}
 
 # --- Orientation -> yaw/pitch (ported from LibrePods HeadOrientation.kt) -----
 # Neutral ("facing forward") pose: median of CALIB_N consecutive samples
@@ -99,6 +113,42 @@ class Calibrator:
 
 def is_ht(p):
     return len(p) >= 70 and p[:10] == HT_PREFIX and p[10] in (0x44, 0x45) and p[11] == 0
+
+
+def decode_battery(p):
+    """Decode a battery notification into {component: (level, status)}.
+
+    Layout (per LibrePods): prefix, a record count, then count 5-byte
+    records of [component, 0x01, level, status, 0x01]. A disconnected
+    component carries no data and is skipped. Anything malformed decodes
+    to None -- the caller drops it silently, like every other unknown
+    packet on the channel."""
+    if len(p) < 7 or p[:6] != BATTERY_PREFIX:
+        return None
+    count = p[6]
+    if count > 3 or len(p) != 7 + 5 * count:
+        return None
+    out = {}
+    for off in range(7, 7 + 5 * count, 5):
+        comp, spacer, level, status, end = p[off:off + 5]
+        if spacer != 0x01 or end != 0x01:
+            return None
+        if status == 0x04:  # disconnected
+            continue
+        name = BATTERY_COMPONENTS.get(comp)
+        if name and level <= 100:
+            out[name] = (level, BATTERY_STATUSES.get(status, "?"))
+    return out
+
+
+def decode_ear(p):
+    """Decode an ear-detection notification into the two raw pod states:
+    0x00 in ear, 0x01 out of ear, 0x02 in case. The bytes are ordered
+    primary/secondary, NOT left/right -- roles swap when the primary pod is
+    removed, so only "is any byte 0x00" is safe to interpret."""
+    if len(p) < 8 or p[:6] != EAR_PREFIX:
+        return None
+    return p[6], p[7]
 
 
 # --- Runtime re-centering ------------------------------------------------------
@@ -371,24 +421,131 @@ class MultiOutput:
         return ev
 
 
+class BatteryReporter:
+    """Battery logging that respects the journal: one line on any change, a
+    heartbeat re-log every log_secs (0 = changes only), and a low-battery
+    warning per bud at warn_pct that re-arms only after a further
+    REWARN_DROP points down (or a charge) -- a level sitting on the
+    threshold can't spam."""
+
+    REWARN_DROP = 5
+
+    def __init__(self, log_secs, warn_pct, time_fn=time.monotonic):
+        self.log_secs = log_secs
+        self.warn_pct = warn_pct
+        self.time_fn = time_fn
+        self.state = {}    # component -> (level, status), merged over packets
+        self.last_log = None
+        self.warned = {}   # component -> level at the last warning
+
+    def update(self, components):
+        # Merge: a packet may carry any subset of components (e.g. just the
+        # case), and the summary should keep showing the rest.
+        state = dict(self.state)
+        state.update(components)
+        now = self.time_fn()
+        heartbeat = (self.log_secs and self.last_log is not None
+                     and now - self.last_log >= self.log_secs)
+        if state != self.state or self.last_log is None or heartbeat:
+            print(f"battery: {self._fmt(state)}", flush=True)
+            self.last_log = now
+        self.state = state
+        self._warn_low()
+
+    def _warn_low(self):
+        for name, (level, status) in self.state.items():
+            if name == "case" or status == "charging" or level > self.warn_pct:
+                self.warned.pop(name, None)  # recovered or charging: re-arm
+                continue
+            if not self.warn_pct or status != "discharging":
+                continue
+            last = self.warned.get(name)
+            if last is None or level <= last - self.REWARN_DROP:
+                self.warned[name] = level
+                print(f"battery LOW: {name} at {level}%", flush=True)
+
+    def summary(self):
+        """Short form for the systemd status line; None before any data."""
+        return self._fmt(self.state) if self.state else None
+
+    @staticmethod
+    def _fmt(state):
+        names = [n for n in ("headset", "L", "R", "case") if n in state]
+        text = " ".join(f"{n} {state[n][0]}%" for n in names)
+        charging = [n for n in names if state[n][1] == "charging"]
+        if charging:
+            text += f" ({', '.join(charging)} charging)"
+        return text
+
+
+class SdNotifier:
+    """systemd STATUS= updates over $NOTIFY_SOCKET (sd_notify), stdlib-only.
+
+    No socket in the environment (manual run), no AF_UNIX (dev box), or a
+    send error all degrade to a no-op -- the status line is decoration and
+    must never take the bridge down. Unchanged texts are not re-sent. Only
+    STATUS= is used; Type=simple semantics are untouched (the unit grants
+    access with NotifyAccess=main, no Type=notify)."""
+
+    def __init__(self, addr=None):
+        if addr is None:
+            addr = os.environ.get("NOTIFY_SOCKET", "")
+        self.sock, self.addr, self.last = None, None, None
+        if not addr or not hasattr(socket, "AF_UNIX"):
+            return
+        if addr[0] == "@":  # Linux abstract socket namespace
+            addr = "\0" + addr[1:]
+        try:
+            self.sock = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            self.addr = addr
+        except OSError:
+            self.sock = None
+
+    def status(self, text):
+        if self.sock is None or text == self.last:
+            return
+        self.last = text
+        try:
+            self.sock.sendto(b"STATUS=" + text.encode() + b"\n", self.addr)
+        except OSError:
+            pass
+
+
+def format_status(state, battery=None):
+    """The unit's Status: line -- current state, plus battery when known."""
+    return f"{state} | battery {battery}" if battery else state
+
+
 # --- Main loop ---------------------------------------------------------------
 # Connect, start the stream, convert each sample, hand it to the output.
 # Reconnects from scratch whenever the Bluetooth link drops (e.g. the AirPods
 # go back in the case).
-def run(mac, output, recalib_secs, verbose):
+def run(mac, output, recalib_secs, verbose, notifier, battery):
+    state = "starting"
+
+    def set_status(new=None):
+        nonlocal state
+        if new is not None:
+            state = new
+        notifier.status(format_status(state, battery.summary()))
+
     while True:
+        set_status("connecting to AirPods")
         s = connect_l2cap(mac)
         print("L2CAP open -> streaming pitch/yaw", flush=True)
         calib, neutral, last_calib = Calibrator(), None, time.monotonic()
+        in_ear, dry = None, False
         try:
             # Inside the reconnect guard: the link can drop this early too
             # (buds straight back into the case), and that has to loop back
             # to a reconnect, not escape as an unhandled OSError.
             s.send(HANDSHAKE)
             time.sleep(0.3)
+            s.send(REQUEST_NOTIFICATIONS)  # battery + ear-status pushes
             s.send(START_ALT)
             s.settimeout(2)
             last_ht = last_start = time.monotonic()
+            set_status("calibrating - hold still, face forward")
             while True:
                 try:
                     p = s.recv(2048)
@@ -401,25 +558,46 @@ def run(mac, output, recalib_secs, verbose):
                     neutral, calib, last_calib = None, Calibrator(), now
                     print("recenter requested - face forward, hold still",
                           flush=True)
+                    set_status("recalibrating - hold still")
 
                 # The stream is dry. AirPods only stream head tracking while
                 # in-ear, and won't begin on a start command that was sent
                 # while they were in the case -- so re-send it periodically
                 # to catch the buds being put in after the channel opened
                 # (mirrors the Pico firmware's watchdog). Keyed off the last
-                # head-tracking packet, NOT recv timeouts: any other traffic
-                # on the channel (status notifications) would keep recv fed
-                # forever while no tracking flows.
-                if now - last_ht >= 4.0 and now - last_start >= 4.0:
+                # head-tracking packet, NOT recv timeouts: battery/ear
+                # notifications keep recv fed without any tracking flowing.
+                # When the buds are known out-of-ear the cadence stretches --
+                # a missed ear event can only delay the start, never block it.
+                if now - last_ht >= 4.0 and \
+                        now - last_start >= (30.0 if in_ear is False else 4.0):
                     s.send(START_ALT)
                     last_start = now
+                    dry = True
                     print("no data - re-sent start (buds in-ear?)", flush=True)
+                    set_status("idle - waiting for buds in-ear")
 
                 if p is None:
                     continue
                 if not is_ht(p):
+                    levels = decode_battery(p)
+                    if levels is not None:
+                        if levels:
+                            battery.update(levels)
+                            set_status()  # refresh the battery part
+                        continue
+                    ear = decode_ear(p)
+                    if ear is not None:
+                        was, in_ear = in_ear, 0x00 in ear
+                        if was is not in_ear:
+                            print("buds in ear" if in_ear
+                                  else "buds out of ear (case?)", flush=True)
                     continue
                 last_ht = now
+                if dry:
+                    dry = False
+                    set_status("streaming" if neutral is not None
+                               else "calibrating - hold still, face forward")
                 # Orientation triple sits at offsets 43/45/47; only the two
                 # combined axes at 45/47 enter the pitch/yaw math.
                 o2, o3 = s16(p, 45), s16(p, 47)
@@ -429,12 +607,14 @@ def run(mac, output, recalib_secs, verbose):
                     if neutral is not None:
                         print(f"calibrated neutral=({neutral[0]:.0f}, {neutral[1]:.0f})",
                               flush=True)
+                        set_status("streaming")
                     continue
 
                 # Optional periodic recalibration (drift correction).
                 if recalib_secs and (time.monotonic() - last_calib) >= recalib_secs:
                     neutral, calib, last_calib = None, Calibrator(), time.monotonic()
                     print("recalibrating - hold still, face forward", flush=True)
+                    set_status("recalibrating - hold still")
                     continue
 
                 o2n = wrap_s16(o2 - neutral[0])
@@ -446,6 +626,7 @@ def run(mac, output, recalib_secs, verbose):
                     print(f"yaw={yaw:7.2f}  pitch={pitch:7.2f}", flush=True)
         except OSError as e:
             print(f"link dropped ({e}); reconnecting...", flush=True)
+            set_status("reconnecting")
             try:
                 s.close()
             except OSError:
@@ -499,6 +680,14 @@ if __name__ == "__main__":
                     action="store_false",
                     help="do not re-center automatically when the PC starts "
                          "reading the serial port [env RECENTER_ON_START]")
+    ap.add_argument("--battery-log-secs", type=float,
+                    default=env_num("BATTERY_LOG_SECS", "900", float),
+                    help="battery heartbeat interval; changes always log, "
+                         "0 = changes only [env BATTERY_LOG_SECS] (default: 900)")
+    ap.add_argument("--battery-warn-pct", type=int,
+                    default=env_num("BATTERY_WARN_PCT", "20", int),
+                    help="low-battery warning threshold, 0 = off "
+                         "[env BATTERY_WARN_PCT] (default: 20)")
     ap.add_argument("--verbose", action="store_true",
                     help="log every sample [env VERBOSE]")
     ap.add_argument("--no-verbose", dest="verbose", action="store_false",
@@ -520,6 +709,10 @@ if __name__ == "__main__":
     if a.transport in ("udp", "both") and not a.pc_ip:
         ap.error("PC IP not set - pass it on the command line, set UDP_HOST in "
                  "/etc/pods-head-tracker.conf, or use --transport serial")
+    if a.battery_log_secs < 0:
+        ap.error(f"invalid BATTERY_LOG_SECS {a.battery_log_secs} - must be >= 0")
+    if not 0 <= a.battery_warn_pct <= 100:
+        ap.error(f"invalid BATTERY_WARN_PCT {a.battery_warn_pct} - must be 0-100")
     try:
         # OpenTrack sends commands verbatim as Latin-1 bytes, so that is the
         # encoding the token is matched in.
@@ -543,7 +736,8 @@ if __name__ == "__main__":
         signal.signal(signal.SIGUSR1, request_recenter)
 
     try:
-        run(a.mac, out, a.recalibrate_secs, a.verbose)
+        run(a.mac, out, a.recalibrate_secs, a.verbose,
+            SdNotifier(), BatteryReporter(a.battery_log_secs, a.battery_warn_pct))
     except KeyboardInterrupt:
         pass
     except PermissionError:

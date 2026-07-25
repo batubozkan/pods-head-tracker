@@ -236,7 +236,7 @@ samples captured while moving are discarded and retried automatically
 (watch for `calibrated` in the journal).
 
 ```bash
-systemctl status pods-head-tracker              # running / connected?
+systemctl status pods-head-tracker              # state + battery at a glance
 sudo journalctl -u pods-head-tracker -f         # live log
 ```
 
@@ -274,6 +274,20 @@ there.
 
 `sudo systemctl restart pods-head-tracker` still works as the big hammer.
 
+### Battery and status
+
+The bridge decodes the battery reports the AirPods push over the same
+connection and logs them to the journal: on every change, as a heartbeat
+every 15 minutes (`BATTERY_LOG_SECS`), and as a warning when a bud
+discharges to 20 % (`BATTERY_WARN_PCT`). The current state also shows
+directly in the service status:
+
+```console
+$ systemctl status pods-head-tracker
+     ...
+     Status: "streaming | battery L 82% R 80% case 71%"
+```
+
 ## Gotchas
 
 - **Only one L2CAP connection at a time** — stop the service before running
@@ -299,7 +313,8 @@ there.
 
 The AirPods AACP protocol details, the head-tracking packet format, and the
 pitch/yaw math are derived from **[LibrePods](https://github.com/kavishdevar/librepods)**
-(GPLv3) — specifically its `HeadOrientation` head-tracking implementation.
+(GPLv3) — specifically its `HeadOrientation` head-tracking implementation,
+plus its battery and ear-detection packet documentation.
 This project is a downstream, Raspberry-Pi-based reimplementation and is
 likewise licensed **[GPLv3](LICENSE)**.
 

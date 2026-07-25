@@ -50,6 +50,12 @@ class IsHtTest(unittest.TestCase):
         self.assertFalse(bridge.is_ht(ht_packet(length=69)))
         self.assertFalse(bridge.is_ht(b"\x00" * 70))
 
+    def test_rejects_notification_packets(self):
+        # Guards the dispatch order in run(): battery/ear packets must fall
+        # through is_ht() into the notification decoders.
+        self.assertFalse(bridge.is_ht(DecodeBatteryTest.EXAMPLE))
+        self.assertFalse(bridge.is_ht(bytes.fromhex("0400040006000001")))
+
 
 class CalibratorTest(unittest.TestCase):
     def test_still_head_calibrates_in_one_batch(self):
@@ -167,6 +173,51 @@ class SerialHatireOutputTest(unittest.TestCase):
             self.assertIsNone(out.fd)
         finally:
             os.unlink(path)
+
+
+class DecodeBatteryTest(unittest.TestCase):
+    # The worked example from LibrePods' protocol doc: Right 100%
+    # discharging, Left 99% charging, case 17% discharging.
+    EXAMPLE = bytes.fromhex(
+        "040004000400" "03" "0201640201" "0401630101" "0801110201")
+
+    def test_documented_example(self):
+        self.assertEqual(bridge.decode_battery(self.EXAMPLE), {
+            "R": (100, "discharging"),
+            "L": (99, "charging"),
+            "case": (17, "discharging"),
+        })
+
+    def test_disconnected_component_is_skipped(self):
+        p = bytes.fromhex("040004000400" "01" "0201000401")
+        self.assertEqual(bridge.decode_battery(p), {})
+
+    def test_single_headset_record(self):  # AirPods Max shape
+        p = bytes.fromhex("040004000400" "01" "0101550101")
+        self.assertEqual(bridge.decode_battery(p), {"headset": (0x55, "charging")})
+
+    def test_rejects_malformed(self):
+        self.assertIsNone(bridge.decode_battery(b"\x00" * 22))            # prefix
+        self.assertIsNone(bridge.decode_battery(self.EXAMPLE[:-1]))       # short
+        self.assertIsNone(bridge.decode_battery(self.EXAMPLE + b"\x00"))  # long
+        bad_count = bytearray(self.EXAMPLE)
+        bad_count[6] = 4
+        self.assertIsNone(bridge.decode_battery(bytes(bad_count)))
+        bad_spacer = bytearray(self.EXAMPLE)
+        bad_spacer[8] = 0x02
+        self.assertIsNone(bridge.decode_battery(bytes(bad_spacer)))
+        self.assertIsNone(bridge.decode_battery(ht_packet()))
+
+
+class DecodeEarTest(unittest.TestCase):
+    def test_primary_secondary_bytes(self):
+        self.assertEqual(bridge.decode_ear(bytes.fromhex("0400040006000001")),
+                         (0, 1))
+
+    def test_rejects_short_and_foreign(self):
+        self.assertIsNone(bridge.decode_ear(bytes.fromhex("04000400060000")))
+        self.assertIsNone(bridge.decode_ear(ht_packet()))
+        self.assertIsNone(bridge.decode_ear(DecodeBatteryTest.EXAMPLE))
 
 
 class RecenterFlagTest(unittest.TestCase):
@@ -317,6 +368,110 @@ class SerialCommandTest(unittest.TestCase):
 
         m = bridge.MultiOutput([Fake(set()), Fake({"recenter"}), Fake(())])
         self.assertEqual(m.poll_events(), {"recenter"})
+
+
+class BatteryReporterTest(unittest.TestCase):
+    def _reporter(self, log_secs=900, warn_pct=20):
+        clock = {"t": 0.0}
+        r = bridge.BatteryReporter(log_secs, warn_pct,
+                                   time_fn=lambda: clock["t"])
+        return r, clock
+
+    @staticmethod
+    def _update(r, comps):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            r.update(comps)
+        return out.getvalue()
+
+    def test_logs_first_and_changes_not_repeats(self):
+        r, clock = self._reporter()
+        both = {"L": (80, "discharging"), "R": (82, "discharging")}
+        self.assertIn("battery: L 80% R 82%", self._update(r, both))
+        clock["t"] += 60
+        self.assertEqual(self._update(r, both), "")
+        clock["t"] += 60
+        self.assertIn("L 79%", self._update(r, {"L": (79, "discharging")}))
+
+    def test_heartbeat_relogs_and_zero_disables_it(self):
+        r, clock = self._reporter(log_secs=900)
+        self._update(r, {"L": (80, "discharging")})
+        clock["t"] += 901
+        self.assertIn("battery:", self._update(r, {"L": (80, "discharging")}))
+        r2, clock2 = self._reporter(log_secs=0)
+        self._update(r2, {"L": (80, "discharging")})
+        clock2["t"] += 10 ** 6
+        self.assertEqual(self._update(r2, {"L": (80, "discharging")}), "")
+
+    def test_merges_components_across_packets(self):
+        r, _ = self._reporter()
+        self._update(r, {"L": (80, "discharging")})
+        self._update(r, {"case": (50, "discharging")})
+        self.assertEqual(r.summary(), "L 80% case 50%")
+
+    def test_summary_marks_charging_and_starts_as_none(self):
+        r, _ = self._reporter()
+        self.assertIsNone(r.summary())
+        self._update(r, {"L": (80, "charging"), "R": (82, "discharging")})
+        self.assertEqual(r.summary(), "L 80% R 82% (L charging)")
+
+    def test_low_warning_once_then_only_after_further_drop(self):
+        r, _ = self._reporter(warn_pct=20)
+        self.assertIn("battery LOW: L at 20%",
+                      self._update(r, {"L": (20, "discharging")}))
+        self.assertNotIn("LOW", self._update(r, {"L": (19, "discharging")}))
+        self.assertIn("battery LOW: L at 15%",
+                      self._update(r, {"L": (15, "discharging")}))
+
+    def test_charging_rearms_and_case_never_warns(self):
+        r, _ = self._reporter(warn_pct=20)
+        self._update(r, {"L": (20, "discharging")})
+        self._update(r, {"L": (60, "charging")})
+        self.assertIn("battery LOW: L at 18%",
+                      self._update(r, {"L": (18, "discharging")}))
+        self.assertNotIn("LOW", self._update(r, {"case": (5, "discharging")}))
+
+    def test_warn_pct_zero_disables_warnings(self):
+        r, _ = self._reporter(warn_pct=0)
+        self.assertNotIn("LOW", self._update(r, {"L": (1, "discharging")}))
+
+
+class FormatStatusTest(unittest.TestCase):
+    def test_with_and_without_battery(self):
+        self.assertEqual(bridge.format_status("streaming"), "streaming")
+        self.assertEqual(bridge.format_status("streaming", "L 80% R 82%"),
+                         "streaming | battery L 80% R 82%")
+
+
+class SdNotifierTest(unittest.TestCase):
+    def test_no_socket_env_is_a_noop(self):
+        n = bridge.SdNotifier(addr="")
+        n.status("anything")  # must not raise
+        self.assertIsNone(n.sock)
+
+    @unittest.skipUnless(hasattr(socket, "AF_UNIX"), "AF_UNIX unavailable")
+    def test_sends_status_datagrams_and_dedupes(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "notify")
+            rx = socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM)
+            rx.bind(path)
+            rx.setblocking(False)
+            try:
+                n = bridge.SdNotifier(addr=path)
+                n.status("streaming")
+                self.assertEqual(rx.recv(256), b"STATUS=streaming\n")
+                n.status("streaming")  # unchanged: nothing sent
+                with self.assertRaises(BlockingIOError):
+                    rx.recv(256)
+                n.status("idle")
+                self.assertEqual(rx.recv(256), b"STATUS=idle\n")
+            finally:
+                rx.close()
+
+    @unittest.skipUnless(hasattr(socket, "AF_UNIX"), "AF_UNIX unavailable")
+    def test_abstract_address_translation(self):
+        n = bridge.SdNotifier(addr="@pods-test")
+        self.assertEqual(n.addr, "\0pods-test")
 
 
 if __name__ == "__main__":
