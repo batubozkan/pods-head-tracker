@@ -37,8 +37,20 @@ SERIAL_DEV=/dev/ttyGS0
 #AUDIO_VOLUME=70
 
 # Re-zero the neutral ("facing forward") pose every N seconds (0 = only when
-# the connection opens; re-center anytime with: systemctl restart).
+# the connection opens; see the on-demand re-centering below).
 RECALIBRATE_SECS=0
+
+# --- on-demand re-centering (no restart needed) ---
+# On the serial transport the bridge re-centers by itself every time the
+# PC (re)starts reading the COM port -- i.e. every time you press Start in
+# OpenTrack. 0 = off. (UDP can't detect this: FreePIE is receive-only.)
+#RECENTER_ON_START=1
+# Re-center any time, on any transport, with:
+#   sudo systemctl kill --signal=SIGUSR1 pods-head-tracker
+# OpenTrack can also send the token below over the COM port (Hatire
+# dialog: put it in "Reset command" for the Reset button, or type it in
+# the Send box). Matched as raw bytes in the serial stream; empty = off.
+#RECENTER_CMD=RECENTER
 
 # 1 = log every sample (noisy; debugging only).
 VERBOSE=0

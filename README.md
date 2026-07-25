@@ -233,13 +233,46 @@ and starts streaming within a few seconds. It calibrates the neutral
 ("forward") pose right after each connection: face forward and hold still
 for a moment — a still head calibrates in a fraction of a second, and
 samples captured while moving are discarded and retried automatically
-(watch for `calibrated` in the journal). To re-center:
-`sudo systemctl restart pods-head-tracker`.
+(watch for `calibrated` in the journal).
 
 ```bash
 systemctl status pods-head-tracker              # running / connected?
 sudo journalctl -u pods-head-tracker -f         # live log
 ```
+
+### Re-centering
+
+On the **serial transport** you normally never think about it: the bridge
+re-centers automatically **every time you press Start in OpenTrack**. (It
+detects the COM port being read again after a stop — so sit straight and
+face forward when you hit Start, exactly like you naturally do.) A stop
+shorter than ~3 s doesn't count, so a brief PC hiccup can't re-center you
+mid-race. Set `RECENTER_ON_START=0` to turn this off.
+
+To re-capture the neutral pose at any other moment — on **any transport**,
+without restarting anything:
+
+```bash
+sudo systemctl kill --signal=SIGUSR1 pods-head-tracker
+```
+
+then face forward and hold still for a moment (`recenter requested` …
+`calibrated` in the journal).
+
+OpenTrack can also trigger it mid-session over the serial port: put
+`RECENTER` (the `RECENTER_CMD` default) in the Hatire dialog's **Reset
+command** field and its **Reset** button re-centers the bridge; the
+dialog's **Send** box works too. OpenTrack's *Center hotkey*, by contrast,
+never reaches the bridge — it re-zeros in software on the PC. That's fine
+day to day, but a bridge-level re-center also moves the ±180° wrap seam
+away from where you're facing, which PC-side centering can't.
+
+Why doesn't the Wi-Fi transport auto-re-center on Start? OpenTrack's
+FreePIE UDP input is receive-only — nothing ever travels back to the Pi,
+so the bridge can't tell when OpenTrack starts listening. Use SIGUSR1
+there.
+
+`sudo systemctl restart pods-head-tracker` still works as the big hammer.
 
 ## Gotchas
 

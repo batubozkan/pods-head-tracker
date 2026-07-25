@@ -12,6 +12,7 @@ import pathlib
 import socket
 import struct
 import tempfile
+import time
 import unittest
 
 _path = pathlib.Path(__file__).resolve().parent.parent / "opentrack_bridge.py"
@@ -166,6 +167,156 @@ class SerialHatireOutputTest(unittest.TestCase):
             self.assertIsNone(out.fd)
         finally:
             os.unlink(path)
+
+
+class RecenterFlagTest(unittest.TestCase):
+    def test_request_consume_cycle(self):
+        self.assertFalse(bridge.consume_recenter())
+        bridge.request_recenter()
+        self.assertTrue(bridge.consume_recenter())
+        self.assertFalse(bridge.consume_recenter())
+
+
+class CommandScannerTest(unittest.TestCase):
+    def test_whole_token_matches_and_clears(self):
+        sc = bridge.CommandScanner(b"RECENTER")
+        self.assertTrue(sc.feed(b"RECENTER"))
+        self.assertEqual(len(sc.buf), 0)  # a hit consumes the buffer
+
+    def test_token_split_across_reads(self):
+        sc = bridge.CommandScanner(b"RECENTER")
+        self.assertFalse(sc.feed(b"\x00\xaaREC"))
+        self.assertFalse(sc.feed(b"ENT"))
+        self.assertTrue(sc.feed(b"ER\x55"))
+
+    def test_token_inside_binary_garbage(self):
+        sc = bridge.CommandScanner(b"RECENTER")
+        self.assertTrue(sc.feed(b"\xaa\xaa\x00\nRECENTER\x55\x55"))
+
+    def test_garbage_keeps_the_buffer_bounded(self):
+        sc = bridge.CommandScanner(b"RECENTER")
+        for _ in range(1000):
+            self.assertFalse(sc.feed(b"\x00" * 100))
+        self.assertLessEqual(len(sc.buf), len(b"RECENTER") - 1)
+
+    def test_empty_token_never_matches_or_buffers(self):
+        sc = bridge.CommandScanner(b"")
+        self.assertFalse(sc.feed(b"anything"))
+        self.assertEqual(len(sc.buf), 0)
+
+
+class SerialCommandTest(unittest.TestCase):
+    def _make(self, content, token="RECENTER"):
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            f.write(content)
+            path = f.name
+        return bridge.SerialHatireOutput(path, token.encode()), path
+
+    def _cleanup(self, out, path):
+        if out.fd is not None:
+            os.close(out.fd)
+        os.unlink(path)
+
+    def test_token_in_the_rx_stream_recenters_once(self):
+        out, path = self._make(b"\xaa\x00garbage RECENTER trailing")
+        try:
+            self.assertEqual(out.poll_events(), {"recenter"})
+            out.next_poll = 0.0
+            self.assertEqual(set(out.poll_events()), set())  # already drained
+        finally:
+            self._cleanup(out, path)
+
+    def test_poll_is_rate_limited_then_catches_up(self):
+        out, path = self._make(b"")
+        try:
+            out.poll_events()  # consumes the cadence slot
+            with open(path, "ab") as f:
+                f.write(b"RECENTER")
+            self.assertEqual(set(out.poll_events()), set())  # inside POLL_SECS
+            out.next_poll = 0.0
+            self.assertEqual(out.poll_events(), {"recenter"})
+        finally:
+            self._cleanup(out, path)
+
+    def test_empty_token_skips_reading_entirely(self):
+        out, path = self._make(b"RECENTER", token="")
+        try:
+            self.assertEqual(set(out.poll_events()), set())
+        finally:
+            self._cleanup(out, path)
+
+    def test_reopen_clears_a_partial_token(self):
+        out, path = self._make(b"RECEN")
+        try:
+            out.poll_events()  # buffers the partial token
+            self.assertTrue(out.scanner.buf)
+            os.close(out.fd)
+            out.fd = None
+            out._open()  # a reopen must reset the scanner
+            self.assertEqual(len(out.scanner.buf), 0)
+        finally:
+            self._cleanup(out, path)
+
+    def test_resumed_reads_after_long_stop_recenter_once(self):
+        out, path = self._make(b"")
+        try:
+            out.drop_since = time.monotonic() - out.ARM_SECS - 1.0
+            out.send(0.0, 0.0, 0.0)  # write succeeds again -> arm the event
+            self.assertIsNone(out.drop_since)
+            self.assertEqual(out.poll_events(), {"recenter"})
+            out.next_poll = 0.0
+            self.assertEqual(set(out.poll_events()), set())  # fired once
+        finally:
+            self._cleanup(out, path)
+
+    def test_short_hiccup_does_not_recenter(self):
+        out, path = self._make(b"")
+        try:
+            out.drop_since = time.monotonic() - 0.5  # brief stall, not a stop
+            out.send(0.0, 0.0, 0.0)
+            self.assertIsNone(out.drop_since)  # spell over...
+            self.assertEqual(set(out.poll_events()), set())  # ...but no event
+        finally:
+            self._cleanup(out, path)
+
+    def test_auto_recenter_can_be_disabled(self):
+        with tempfile.NamedTemporaryFile(delete=False) as f:
+            path = f.name
+        out = bridge.SerialHatireOutput(path, b"", auto_recenter=False)
+        try:
+            out.drop_since = time.monotonic() - out.ARM_SECS - 1.0
+            out.send(0.0, 0.0, 0.0)
+            self.assertEqual(set(out.poll_events()), set())
+        finally:
+            self._cleanup(out, path)
+
+    def test_reopen_counts_as_a_stop(self):
+        out, path = self._make(b"")
+        try:
+            os.close(out.fd)  # device dies under us
+            with contextlib.redirect_stdout(io.StringIO()):
+                out.send(0.0, 0.0, 0.0)  # write fails -> _close()
+            self.assertIsNotNone(out.drop_since)  # the spell started
+        finally:
+            self._cleanup(out, path)
+
+    def test_udp_output_has_no_events(self):
+        out = bridge.UdpOutput("127.0.0.1", 4242)
+        try:
+            self.assertEqual(out.poll_events(), ())
+        finally:
+            out.sock.close()
+
+    def test_multi_output_unions_events(self):
+        class Fake:
+            def __init__(self, ev):
+                self.ev = ev
+
+            def poll_events(self):
+                return self.ev
+
+        m = bridge.MultiOutput([Fake(set()), Fake({"recenter"}), Fake(())])
+        self.assertEqual(m.poll_events(), {"recenter"})
 
 
 if __name__ == "__main__":

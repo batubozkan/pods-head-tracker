@@ -8,6 +8,7 @@ to OpenTrack on the PC over Wi-Fi UDP and/or USB serial. Setup: README.md.
 import argparse
 import math
 import os
+import signal
 import socket
 import statistics
 import struct
@@ -100,6 +101,52 @@ def is_ht(p):
     return len(p) >= 70 and p[:10] == HT_PREFIX and p[10] in (0x44, 0x45) and p[11] == 0
 
 
+# --- Runtime re-centering ------------------------------------------------------
+# The neutral pose can be re-captured without restarting the service:
+# SIGUSR1 (sudo systemctl kill --signal=SIGUSR1 pods-head-tracker), or the
+# RECENTER_CMD token arriving on the serial port from OpenTrack's Hatire
+# dialog. Both only set a flag; run() consumes it between samples.
+_recenter = False
+
+
+def request_recenter(signum=None, frame=None):
+    global _recenter
+    _recenter = True
+
+
+def consume_recenter():
+    global _recenter
+    was, _recenter = _recenter, False
+    return was
+
+
+class CommandScanner:
+    """Finds a byte token in a stream that arrives in arbitrary chunks.
+
+    Keeps the last len(token)-1 bytes between feeds, so a token split
+    across reads still matches while garbage can never grow the buffer.
+    A hit clears the buffer -- one token on the wire fires once."""
+
+    def __init__(self, token):
+        self.token = bytes(token)
+        self.buf = bytearray()
+
+    def reset(self):
+        del self.buf[:]
+
+    def feed(self, chunk):
+        if not self.token:
+            return False
+        self.buf += chunk
+        if self.token in self.buf:
+            self.reset()
+            return True
+        keep = len(self.token) - 1
+        if len(self.buf) > keep:
+            del self.buf[:len(self.buf) - keep]
+        return False
+
+
 def connect_l2cap(mac):
     """Open the encrypted AACP L2CAP channel, retrying while the link
     re-establishes from the stored bond."""
@@ -135,6 +182,10 @@ class _Output:
         if now - self._last_warn >= self.WARN_SECS:
             self._last_warn = now
             print(msg, flush=True)
+
+    def poll_events(self):
+        """Transport-borne events ("recenter"); most outputs have none."""
+        return ()
 
 
 class UdpOutput(_Output):
@@ -177,23 +228,49 @@ class SerialHatireOutput(_Output):
     0x0D 0x0A, corrupting frames. EAGAIN (Windows isn't reading the COM port)
     drops the frame; any other error closes the device and re-opens it at
     most once a second, so an unplugged cable never stalls tracking.
+
+    The port is also read (poll_events): OpenTrack's Hatire dialog can send
+    ASCII commands back over the same COM port, and a recenter_cmd token
+    seen in that stream re-centers the bridge.
+
+    With auto_recenter, pressing Start in OpenTrack re-centers by itself:
+    while no PC program reads the COM port, writes fail with EAGAIN, so
+    "frames were being dropped for a while and now go through again" IS
+    "OpenTrack (re)started reading" -- no token to configure. The ARM_SECS
+    minimum spell keeps a brief PC stall (reader hiccup, not a stop) from
+    re-centering mid-game. UDP has no equivalent: FreePIE is one-way, and
+    a host firewall eats the ICMP errors that would reveal a closed port.
     """
 
     REOPEN_SECS = 1.0
+    POLL_SECS = 0.2
+    ARM_SECS = 3.0
 
-    def __init__(self, dev):
+    def __init__(self, dev, recenter_cmd=b"", auto_recenter=True):
         self.dev = dev
         self.fd = None
         self.cpt = 0
         self.next_open = 0.0
+        self.next_poll = 0.0
+        self.scanner = CommandScanner(recenter_cmd)
+        self.auto_recenter = auto_recenter
+        self.drop_since = None  # start of the current not-being-read spell
+        self._resumed = False
         self._open()
 
     def _open(self):
         self.next_open = time.monotonic() + self.REOPEN_SECS
+        # A fresh port must start with a clean scanner: bytes read before a
+        # reopen must not combine with new ones into a phantom command.
+        self.scanner.reset()
         try:
-            # O_NONBLOCK is absent on non-Unix dev boxes (send() still never
-            # blocks there because a regular file can't).
-            fd = os.open(self.dev, os.O_WRONLY | getattr(os, "O_NONBLOCK", 0))
+            # O_RDWR, not O_WRONLY: the PC writes command tokens into the
+            # same port (see poll_events). O_NONBLOCK is absent on non-Unix
+            # dev boxes (send() still never blocks there because a regular
+            # file can't); O_BINARY is the Windows dev-box equivalent of raw.
+            fd = os.open(self.dev, os.O_RDWR
+                         | getattr(os, "O_NONBLOCK", 0)
+                         | getattr(os, "O_BINARY", 0))
         except OSError as e:
             self._warn(f"serial: cannot open {self.dev} ({e}) - will keep retrying")
             return
@@ -205,6 +282,19 @@ class SerialHatireOutput(_Output):
             # testing -- raw mode only matters for the real gadget port.
             pass
         self.fd = fd
+
+    def _close(self):
+        try:
+            os.close(self.fd)
+        except OSError:
+            pass
+        self.fd = None
+        self.next_open = time.monotonic() + self.REOPEN_SECS
+        # A dead port is also "nobody is reading": when writes succeed again
+        # after a reopen (cable back, OpenTrack restarted), the resume
+        # detection below applies just the same.
+        if self.drop_since is None:
+            self.drop_since = time.monotonic()
 
     def send(self, yaw, pitch, roll):
         if self.fd is None:
@@ -220,15 +310,50 @@ class SerialHatireOutput(_Output):
             # A short write tears one frame; OpenTrack resyncs on the markers.
             os.write(self.fd, frame)
         except BlockingIOError:
+            if self.drop_since is None:
+                self.drop_since = time.monotonic()
             self._warn("serial: host not reading (OpenTrack stopped?) - dropping frames")
         except OSError as e:
             self._warn(f"serial: write failed ({e}) - reopening {self.dev}")
+            self._close()
+        else:
+            if self.drop_since is not None:
+                # Frames flow again after a real stop (not just a hiccup):
+                # OpenTrack was started -- the natural moment to re-center.
+                if self.auto_recenter and \
+                        time.monotonic() - self.drop_since >= self.ARM_SECS:
+                    self._resumed = True
+                self.drop_since = None
+
+    def poll_events(self):
+        """Report {"recenter"} when the host started reading again after a
+        stop (auto_recenter) or when the recenter_cmd token arrived on the
+        port. Cheap to call per sample -- actual reads are limited to one
+        drain per POLL_SECS."""
+        events = set()
+        if self._resumed:
+            self._resumed = False
+            events.add("recenter")
+        if self.fd is None or not self.scanner.token:
+            return events
+        now = time.monotonic()
+        if now < self.next_poll:
+            return events
+        self.next_poll = now + self.POLL_SECS
+        for _ in range(64):  # bounds one drain; a tty buffers far less
             try:
-                os.close(self.fd)
-            except OSError:
-                pass
-            self.fd = None
-            self.next_open = time.monotonic() + self.REOPEN_SECS
+                chunk = os.read(self.fd, 256)
+            except BlockingIOError:
+                break
+            except OSError as e:
+                self._warn(f"serial: read failed ({e}) - reopening {self.dev}")
+                self._close()
+                break
+            if not chunk:  # EOF: SERIAL_DEV points at a plain file (tests)
+                break
+            if self.scanner.feed(chunk):
+                events.add("recenter")
+        return events
 
 
 class MultiOutput:
@@ -238,6 +363,12 @@ class MultiOutput:
     def send(self, yaw, pitch, roll):
         for o in self.outputs:
             o.send(yaw, pitch, roll)
+
+    def poll_events(self):
+        ev = set()
+        for o in self.outputs:
+            ev |= set(o.poll_events())
+        return ev
 
 
 # --- Main loop ---------------------------------------------------------------
@@ -264,6 +395,12 @@ def run(mac, output, recalib_secs, verbose):
                 except socket.timeout:
                     p = None
                 now = time.monotonic()
+
+                # Runtime re-center: SIGUSR1 or the serial RECENTER_CMD token.
+                if consume_recenter() or "recenter" in output.poll_events():
+                    neutral, calib, last_calib = None, Calibrator(), now
+                    print("recenter requested - face forward, hold still",
+                          flush=True)
 
                 # The stream is dry. AirPods only stream head tracking while
                 # in-ear, and won't begin on a start command that was sent
@@ -354,11 +491,21 @@ if __name__ == "__main__":
     ap.add_argument("--recalibrate-secs", type=float,
                     default=env_num("RECALIBRATE_SECS", "0", float),
                     help="periodically re-zero the neutral pose (0 = never) [env RECALIBRATE_SECS]")
+    ap.add_argument("--recenter-cmd", default=env("RECENTER_CMD", "RECENTER"),
+                    help="token that re-centers when the PC sends it over the "
+                         "serial port; empty disables [env RECENTER_CMD] "
+                         "(default: RECENTER)")
+    ap.add_argument("--no-recenter-on-start", dest="recenter_on_start",
+                    action="store_false",
+                    help="do not re-center automatically when the PC starts "
+                         "reading the serial port [env RECENTER_ON_START]")
     ap.add_argument("--verbose", action="store_true",
                     help="log every sample [env VERBOSE]")
     ap.add_argument("--no-verbose", dest="verbose", action="store_false",
                     help="override VERBOSE=1 from the config")
-    ap.set_defaults(verbose=env("VERBOSE", "0").lower() in ("1", "true", "yes", "on"))
+    ap.set_defaults(verbose=env("VERBOSE", "0").lower() in ("1", "true", "yes", "on"),
+                    recenter_on_start=env("RECENTER_ON_START", "1").lower()
+                    in ("1", "true", "yes", "on"))
     a = ap.parse_args()
 
     # Validated by hand, not argparse choices=, so bad values coming from the
@@ -373,15 +520,27 @@ if __name__ == "__main__":
     if a.transport in ("udp", "both") and not a.pc_ip:
         ap.error("PC IP not set - pass it on the command line, set UDP_HOST in "
                  "/etc/pods-head-tracker.conf, or use --transport serial")
+    try:
+        # OpenTrack sends commands verbatim as Latin-1 bytes, so that is the
+        # encoding the token is matched in.
+        recenter_cmd = a.recenter_cmd.encode("latin-1")
+    except UnicodeEncodeError:
+        ap.error(f"invalid RECENTER_CMD {a.recenter_cmd!r} - use plain ASCII")
 
     outputs = []
     if a.transport in ("udp", "both"):
         outputs.append(UdpOutput(a.pc_ip, a.port))
         print(f"output: FreePIE UDP -> {a.pc_ip}:{a.port}", flush=True)
     if a.transport in ("serial", "both"):
-        outputs.append(SerialHatireOutput(a.serial_dev))
+        outputs.append(SerialHatireOutput(a.serial_dev, recenter_cmd,
+                                          a.recenter_on_start))
         print(f"output: Hatire serial -> {a.serial_dev}", flush=True)
     out = outputs[0] if len(outputs) == 1 else MultiOutput(outputs)
+
+    # Registered here, not at import time: the tests import this module on
+    # platforms without SIGUSR1.
+    if hasattr(signal, "SIGUSR1"):
+        signal.signal(signal.SIGUSR1, request_recenter)
 
     try:
         run(a.mac, out, a.recalibrate_secs, a.verbose)
