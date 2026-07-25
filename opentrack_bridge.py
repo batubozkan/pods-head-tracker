@@ -249,7 +249,6 @@ def run(mac, output, recalib_secs, verbose):
         s = connect_l2cap(mac)
         print("L2CAP open -> streaming pitch/yaw", flush=True)
         calib, neutral, last_calib = Calibrator(), None, time.monotonic()
-        idle = 0
         try:
             # Inside the reconnect guard: the link can drop this early too
             # (buds straight back into the case), and that has to loop back
@@ -258,23 +257,32 @@ def run(mac, output, recalib_secs, verbose):
             time.sleep(0.3)
             s.send(START_ALT)
             s.settimeout(2)
+            last_ht = last_start = time.monotonic()
             while True:
                 try:
                     p = s.recv(2048)
                 except socket.timeout:
-                    # The stream is dry. AirPods only stream head tracking
-                    # while in-ear, and won't begin on a start command that
-                    # was sent while they were in the case -- so re-send it
-                    # periodically to catch the buds being put in after the
-                    # channel opened (mirrors the Pico firmware's watchdog).
-                    idle += 1
-                    if idle % 2 == 0:
-                        s.send(START_ALT)
-                        print("no data - re-sent start (buds in-ear?)", flush=True)
+                    p = None
+                now = time.monotonic()
+
+                # The stream is dry. AirPods only stream head tracking while
+                # in-ear, and won't begin on a start command that was sent
+                # while they were in the case -- so re-send it periodically
+                # to catch the buds being put in after the channel opened
+                # (mirrors the Pico firmware's watchdog). Keyed off the last
+                # head-tracking packet, NOT recv timeouts: any other traffic
+                # on the channel (status notifications) would keep recv fed
+                # forever while no tracking flows.
+                if now - last_ht >= 4.0 and now - last_start >= 4.0:
+                    s.send(START_ALT)
+                    last_start = now
+                    print("no data - re-sent start (buds in-ear?)", flush=True)
+
+                if p is None:
                     continue
-                idle = 0
                 if not is_ht(p):
                     continue
+                last_ht = now
                 # Orientation triple sits at offsets 43/45/47; only the two
                 # combined axes at 45/47 enter the pitch/yaw math.
                 o2, o3 = s16(p, 45), s16(p, 47)
