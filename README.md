@@ -435,9 +435,24 @@ $ systemctl status pods-head-tracker
 
 ## Known limitations
 
-- **Yaw and pitch only.** The current mathematics cannot derive roll from
-  the orientation values of the AirPods. The bridge always sends roll
-  as 0.
+- **Yaw and pitch only.** The confirmed mathematics cannot derive roll
+  from the orientation values of the AirPods. The bridge sends roll as 0
+  by default. An **experimental** `ROLL=1` option maps the unused third
+  orientation field to roll, but this mapping is not confirmed on
+  hardware. To examine it on your model, record one CSV file for each
+  pure head motion with the probe, and compare which columns move:
+
+  ```bash
+  sudo systemctl stop pods-head-tracker
+  sudo python3 /usr/local/bin/airpods_ht_probe.py <MAC> --seconds 30 --csv still.csv   # hold still
+  sudo python3 /usr/local/bin/airpods_ht_probe.py <MAC> --seconds 30 --csv yaw.csv     # turn left/right only
+  sudo python3 /usr/local/bin/airpods_ht_probe.py <MAC> --seconds 30 --csv pitch.csv   # nod up/down only
+  sudo python3 /usr/local/bin/airpods_ht_probe.py <MAC> --seconds 30 --csv roll.csv    # tilt ear-to-shoulder only
+  sudo systemctl start pods-head-tracker
+  ```
+
+  If `o1` moves in `roll.csv` and stays still in the other files, the
+  `ROLL=1` mapping is correct for your model.
 - One pair of AirPods for each Pi. The bridge owns the single AACP
   channel.
 

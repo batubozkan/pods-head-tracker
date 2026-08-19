@@ -107,12 +107,13 @@ class Calibrator:
         self.samples = []
         self.tries = 0
 
-    def feed(self, o2, o3):
-        """Add one sample; returns the neutral (o2, o3) pair once captured."""
+    def feed(self, *vals):
+        """Add one sample (any number of axes); returns the neutral tuple
+        once captured."""
         if self.ref is None:
-            self.ref = (o2, o3)
-        self.samples.append((wrap_s16(o2 - self.ref[0]),
-                             wrap_s16(o3 - self.ref[1])))
+            self.ref = vals
+        self.samples.append(tuple(wrap_s16(v - r)
+                                  for v, r in zip(vals, self.ref)))
         if len(self.samples) < CALIB_N:
             return None
         axes = list(zip(*self.samples))
@@ -542,7 +543,7 @@ def format_status(state, battery=None):
 # Reconnects from scratch whenever the Bluetooth link drops (e.g. the AirPods
 # go back in the case).
 def run(mac, output, recalib_secs, verbose, notifier, battery, starts=None,
-        ear_pause=True, ear_recenter=True,
+        ear_pause=True, ear_recenter=True, roll_axis=False,
         *, connect=connect_l2cap, clock=time.monotonic, sleep=time.sleep):
     # connect/clock/sleep are injection points for the tests (fake socket,
     # fake time); the defaults are the real thing.
@@ -677,15 +678,16 @@ def run(mac, output, recalib_secs, verbose, notifier, battery, starts=None,
                     # calibrator or the outputs -- but it did update last_ht
                     # above, so the START watchdog stays quiet.
                     continue
-                # Orientation triple sits at offsets 43/45/47; only the two
-                # combined axes at 45/47 enter the pitch/yaw math.
-                o2, o3 = s16(p, 45), s16(p, 47)
+                # Orientation triple sits at offsets 43/45/47. The combined
+                # axes at 45/47 make pitch/yaw; o1 at 43 rides through the
+                # same calibration and feeds the experimental roll (--roll).
+                o1, o2, o3 = s16(p, 43), s16(p, 45), s16(p, 47)
 
                 if neutral is None:
-                    neutral = calib.feed(o2, o3)
+                    neutral = calib.feed(o1, o2, o3)
                     if neutral is not None:
-                        print(f"calibrated neutral=({neutral[0]:.0f}, {neutral[1]:.0f})",
-                              flush=True)
+                        print("calibrated neutral=({:.0f}, {:.0f}, {:.0f})"
+                              .format(*neutral), flush=True)
                         set_status("streaming")
                     continue
 
@@ -696,14 +698,20 @@ def run(mac, output, recalib_secs, verbose, notifier, battery, starts=None,
                     set_status("recalibrating - hold still")
                     continue
 
-                o2n = wrap_s16(o2 - neutral[0])
-                o3n = wrap_s16(o3 - neutral[1])
+                o1n = wrap_s16(o1 - neutral[0])
+                o2n = wrap_s16(o2 - neutral[1])
+                o3n = wrap_s16(o3 - neutral[2])
                 pitch = (o2n + o3n) / 2 / FULL_SCALE * 180.0  # degrees
                 yaw = (o2n - o3n) / 2 / FULL_SCALE * 180.0
-                held = (yaw, pitch, 0.0)  # roll not derived
+                # Placeholder roll formula (o1 scaled like the other axes),
+                # off by default: which field really carries roll is still
+                # unconfirmed -- the probe's --csv protocol answers that.
+                roll = o1n / FULL_SCALE * 180.0 if roll_axis else 0.0
+                held = (yaw, pitch, roll)
                 output.send(*held)
                 if verbose:
-                    print(f"yaw={yaw:7.2f}  pitch={pitch:7.2f}", flush=True)
+                    print(f"yaw={yaw:7.2f}  pitch={pitch:7.2f}  "
+                          f"roll={roll:7.2f}", flush=True)
         except OSError as e:
             print(f"link dropped ({e}); reconnecting...", flush=True)
             set_status("reconnecting")
@@ -818,6 +826,12 @@ def main(argv=None):
                     action="store_false",
                     help="do not re-capture the neutral pose when the buds "
                          "return to the ears [env EAR_RECENTER]")
+    ap.add_argument("--roll", dest="roll_axis", action="store_true",
+                    help="EXPERIMENTAL: derive roll from the third "
+                         "orientation field; unconfirmed mapping, see the "
+                         "README [env ROLL]")
+    ap.add_argument("--no-roll", dest="roll_axis", action="store_false",
+                    help="override ROLL=1 from the config")
     ap.add_argument("--battery-log-secs", type=float,
                     default=env_num("BATTERY_LOG_SECS", "900", float),
                     help="battery heartbeat interval; changes always log, "
@@ -836,7 +850,8 @@ def main(argv=None):
     ap.set_defaults(verbose=env_flag("VERBOSE", "0"),
                     recenter_on_start=env_flag("RECENTER_ON_START", "1"),
                     ear_pause=env_flag("EAR_PAUSE", "1"),
-                    ear_recenter=env_flag("EAR_RECENTER", "1"))
+                    ear_recenter=env_flag("EAR_RECENTER", "1"),
+                    roll_axis=env_flag("ROLL", "0"))
     a = ap.parse_args(argv)
 
     # Validated by hand, not argparse choices=, so bad values coming from the
@@ -882,7 +897,8 @@ def main(argv=None):
     try:
         run(a.mac, out, a.recalibrate_secs, a.verbose,
             SdNotifier(), BatteryReporter(a.battery_log_secs, a.battery_warn_pct),
-            start_variants(a.ht_start), a.ear_pause, a.ear_recenter)
+            start_variants(a.ht_start), a.ear_pause, a.ear_recenter,
+            a.roll_axis)
     except KeyboardInterrupt:
         pass
     except PermissionError:

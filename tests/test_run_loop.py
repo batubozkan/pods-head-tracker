@@ -309,6 +309,22 @@ class CalibrationAndMathTest(RunLoopCase):
         self.assertIn("battery: L 99% R 100% case 17% (L charging)", self.log)
         self.assertIn("battery L 99%", " ".join(self.notifier.statuses))
 
+    def test_roll_disabled_sends_zero_even_with_o1_motion(self):
+        self.run_bridge(STILL + [ht(o1=5000, o2=1000, o3=-500), _Stop])
+        self.assertEqual(self.out.sent[-1][2], 0.0)
+
+    def test_roll_enabled_maps_o1_like_the_other_axes(self):
+        self.run_bridge(STILL + [ht(o1=320, o2=1000, o3=-500), _Stop],
+                        roll_axis=True)
+        roll = self.out.sent[-1][2]
+        self.assertAlmostEqual(roll, 320 / bridge.FULL_SCALE * 180.0, places=4)
+
+    def test_roll_uses_its_own_calibrated_neutral(self):
+        still = [ht(o1=700, o2=1000, o3=-500)] * bridge.CALIB_N
+        self.run_bridge(still + [ht(o1=700, o2=1000, o3=-500), _Stop],
+                        roll_axis=True)
+        self.assertAlmostEqual(self.out.sent[-1][2], 0.0, places=3)
+
 
 class EarPauseTest(RunLoopCase):
     def test_ear_out_freezes_output_and_holds_the_pose(self):
@@ -471,6 +487,16 @@ class MainArgparseTest(unittest.TestCase):
         run = self._main([], env={"AIRPODS_MAC": self.MAC,
                                   "UDP_HOST": "127.0.0.1", "EAR_PAUSE": "0"})
         self.assertEqual(run.call_args[0][7:9], (False, True))
+
+    def test_roll_knob_reaches_run(self):
+        run = self._main([self.MAC, "127.0.0.1"])
+        self.assertFalse(run.call_args[0][9])  # off by default
+        run = self._main([self.MAC, "127.0.0.1", "--roll"])
+        self.assertTrue(run.call_args[0][9])
+        run = self._main(["--no-roll"], env={"AIRPODS_MAC": self.MAC,
+                                             "UDP_HOST": "127.0.0.1",
+                                             "ROLL": "1"})
+        self.assertFalse(run.call_args[0][9])
 
 
 if __name__ == "__main__":

@@ -61,6 +61,12 @@ RECALIBRATE_SECS=0
 # the Send box). Matched as raw bytes in the serial stream; empty = off.
 #RECENTER_CMD=RECENTER
 
+# --- roll (EXPERIMENTAL) ---
+# 1 = derive roll from the third orientation field. This mapping is not
+# confirmed on hardware yet -- see the roll section of the README before
+# you enable it. 0 = roll is always sent as 0 (the safe default).
+#ROLL=0
+
 # --- ear detection ---
 # 1 = freeze the pose while no bud is in an ear. Pulling the buds out is
 # itself head motion; without the freeze that garbage reaches the game.

@@ -110,6 +110,16 @@ class CalibratorTest(unittest.TestCase):
                 feeds += 1
         self.assertEqual(feeds, bridge.CALIB_N * (bridge.CALIB_MAX_TRIES + 1))
 
+    def test_three_axes_calibrate_together(self):
+        # The roll plumbing feeds o1/o2/o3; feed() must be arity-generic.
+        c = bridge.Calibrator()
+        n = None
+        for i in range(bridge.CALIB_N):
+            n = c.feed(300 + i % 3, 1000, -500)
+        self.assertEqual(len(n), 3)
+        self.assertLessEqual(abs(n[0] - 300), 3)
+        self.assertEqual((n[1], n[2]), (1000, -500))
+
     def test_neutral_near_the_seam_keeps_later_deltas_small(self):
         c = bridge.Calibrator()
         seam = [32760, -32766, 32762, -32764, 32765,
@@ -129,7 +139,7 @@ class UdpOutputTest(unittest.TestCase):
         try:
             out = bridge.UdpOutput("localhost", rx.getsockname()[1])
             self.assertEqual(out.dest[0], "127.0.0.1")  # resolved once, up front
-            out.send(10.0, -5.0, 0.0)
+            out.send(10.0, -5.0, 2.0)
             data, _ = rx.recvfrom(64)
         finally:
             rx.close()
@@ -137,7 +147,7 @@ class UdpOutputTest(unittest.TestCase):
         self.assertEqual(flags, 0x02)
         self.assertAlmostEqual(fl[0], math.radians(10.0), places=6)
         self.assertAlmostEqual(fl[1], math.radians(-5.0), places=6)
-        self.assertAlmostEqual(fl[2], 0.0, places=6)
+        self.assertAlmostEqual(fl[2], math.radians(2.0), places=6)
 
     def test_unresolvable_host_falls_back_and_never_raises(self):
         out = bridge.UdpOutput("no.such.host.invalid", 4242)
@@ -152,7 +162,7 @@ class SerialHatireOutputTest(unittest.TestCase):
             path = f.name
         try:
             out = bridge.SerialHatireOutput(path)
-            out.send(1.5, -2.5, 0.0)   # send(yaw, pitch, roll)
+            out.send(1.5, -2.5, 0.75)  # send(yaw, pitch, roll)
             out.send(0.0, 0.0, 0.0)
             data = pathlib.Path(path).read_bytes()
         finally:
@@ -165,7 +175,7 @@ class SerialHatireOutputTest(unittest.TestCase):
         self.assertEqual((begin, cpt, end),
                          (bridge.HATIRE_BEGIN, 0, bridge.HATIRE_END))
         self.assertAlmostEqual(yaw, 1.5, places=5)
-        self.assertAlmostEqual(roll, 0.0, places=5)   # frame order: yaw, roll, pitch
+        self.assertAlmostEqual(roll, 0.75, places=5)  # frame order: yaw, roll, pitch
         self.assertAlmostEqual(pitch, -2.5, places=5)
         self.assertEqual(struct.unpack_from("<HH", data, 30)[1], 1)
 
