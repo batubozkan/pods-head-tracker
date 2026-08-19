@@ -248,6 +248,18 @@ class StartWatchdogTest(RunLoopCase):
                         starts=bridge.start_variants("both"))
         self.assertIn("stream started after start DEF", self.log)
 
+    def test_both_sticks_to_the_winner_across_reconnects(self):
+        self.run_bridge([lambda: self.clock.advance(4.1), socket.timeout,
+                         ht(o2=1000, o3=-500),          # DEF wins
+                         OSError(errno.ECONNRESET, "reset")],
+                        [lambda: self.clock.advance(4.1), socket.timeout,
+                         _Stop],
+                        starts=bridge.start_variants("both"))
+        self.assertIn("hint: set HT_START=def", self.log)
+        self.assertEqual(self.socks[0].starts_sent(), ["ALT", "DEF"])
+        # The reconnect sends the winner first and never alternates again.
+        self.assertEqual(self.socks[1].starts_sent(), ["DEF", "DEF"])
+
 
 class CalibrationAndMathTest(RunLoopCase):
     def test_calibrates_then_streams(self):

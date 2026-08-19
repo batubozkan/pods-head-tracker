@@ -656,9 +656,19 @@ def run(mac, output, recalib_secs, verbose, notifier, battery, starts=None,
                     if len(starts) > 1:
                         # With HT_START=both the journal must show which
                         # variant this model answered -- that is the whole
-                        # point of the mode.
-                        print(f"stream started after start {starts[start_i][0]}",
-                              flush=True)
+                        # point of the mode. Stick to the winner for the
+                        # rest of the process: reconnects send it first and
+                        # never alternate again. Not written back to the
+                        # config -- the unit runs with ProtectSystem=full
+                        # (/etc is read-only here), and the config belongs
+                        # to the user; hence the hint.
+                        name = starts[start_i][0]
+                        print(f"stream started after start {name}", flush=True)
+                        print(f"hint: set HT_START={name.lower()} in "
+                              "/etc/pods-head-tracker.conf to make this "
+                              "permanent", flush=True)
+                        starts = [starts[start_i]]
+                        start_i = 0
                     set_status("streaming" if neutral is not None
                                else "calibrating - hold still, face forward")
                 if paused:
@@ -705,12 +715,43 @@ def run(mac, output, recalib_secs, verbose, notifier, battery, starts=None,
 
 
 # --- Configuration -----------------------------------------------------------
-# CLI arguments override environment variables (AIRPODS_MAC, TRANSPORT,
-# UDP_HOST, UDP_PORT, SERIAL_DEV, HT_START, RECALIBRATE_SECS, VERBOSE);
-# the systemd service supplies the env from /etc/pods-head-tracker.conf via
-# EnvironmentFile=, so its ExecStart needs no arguments.
+# Precedence: CLI arguments > environment variables > --config file, layered
+# by explicitness -- the file is the persistent baseline, the environment is
+# what the invoking context says right now (the systemd service feeds
+# /etc/pods-head-tracker.conf through it via EnvironmentFile=, so its
+# ExecStart needs no arguments), and a typed flag is the most deliberate.
+# --config exists for manual runs outside systemd, where nothing else would
+# read the conf file.
+_config = {}
+
+
+def load_config(path):
+    """Read a KEY=VALUE file the way systemd's EnvironmentFile does: blank
+    lines and # comments skipped, one layer of matching quotes stripped.
+    An unreadable file is a loud SystemExit -- an explicitly requested
+    config is a setup error when missing, not a soft default."""
+    conf = {}
+    try:
+        with open(path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, _, val = line.partition("=")
+                val = val.strip()
+                if len(val) >= 2 and val[0] == val[-1] and val[0] in "\"'":
+                    val = val[1:-1]
+                conf[key.strip()] = val
+    except OSError as e:
+        raise SystemExit(f"cannot read config file {path}: {e}")
+    return conf
+
+
 def env(name, default=None):
     v = os.environ.get(name, "").strip()
+    if v:
+        return v
+    v = _config.get(name, "").strip()
     return v if v else default
 
 
@@ -723,6 +764,16 @@ def env_num(name, default, cast):
 
 
 def main(argv=None):
+    # --config must be loaded before the main parser is built: its defaults
+    # call env() at construction time. Hence a bare pre-pass for that one
+    # flag; the main parser re-registers it so --help shows it.
+    pre = argparse.ArgumentParser(add_help=False)
+    pre.add_argument("--config")
+    _config.clear()
+    conf_path = pre.parse_known_args(argv)[0].config
+    if conf_path:
+        _config.update(load_config(conf_path))
+
     ap = argparse.ArgumentParser(
         description="AirPods -> OpenTrack head-tracking bridge",
         epilog="Defaults come from environment variables (AIRPODS_MAC, "
@@ -733,6 +784,11 @@ def main(argv=None):
                     help="AirPods Bluetooth Classic MAC [env AIRPODS_MAC]")
     ap.add_argument("pc_ip", nargs="?", default=env("UDP_HOST"),
                     help="PC's IP for the udp transport [env UDP_HOST]")
+    ap.add_argument("--config", metavar="FILE",
+                    help="read KEY=VALUE settings from FILE (same format as "
+                         "/etc/pods-head-tracker.conf) -- for manual runs "
+                         "outside systemd; flags and environment variables "
+                         "override it")
     ap.add_argument("--transport", default=env("TRANSPORT", "udp"),
                     help="udp, serial, or both [env TRANSPORT] (default: udp)")
     ap.add_argument("--port", type=int, default=env_num("UDP_PORT", "4242", int),

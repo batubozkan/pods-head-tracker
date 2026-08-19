@@ -82,7 +82,7 @@ with Raspberry Pi OS.
 | `airpods_ht_probe.py` | A diagnostic tool. It connects, starts head tracking, and shows the raw sensor packets in decoded form. |
 | `pods-head-tracker.conf.example` | The configuration template. It holds your AirPods MAC address, the transport selection, and the PC IP address. Copy it to `/etc/pods-head-tracker.conf` on the Pi. |
 | `pods-head-tracker.service` | The systemd unit. It starts the bridge at boot time and starts it again after a failure. It is generic; all settings come from the configuration file. |
-| `install.sh` | The installer and updater for the three files above. It copies the bridge and the unit into place. It creates the configuration file from the template on the first run. It enables and starts the service after configuration. |
+| `install.sh` | The installer and updater for the four files above. It copies the bridge, the probe, and the unit into place. It creates the configuration file from the template on the first run. It enables and starts the service after configuration. `--uninstall` removes the installation again. |
 | `setup-usb-serial.sh` | A one-time script. It changes the Pi Zero into a USB serial gadget for the USB transport. |
 | `setup-usb-audio.sh` | A one-time script. It adds **USB audio**: you hear the game through the AirPods through the same USB cable. It installs the four files below. |
 | `pods-usb-gadget.sh` / `.service` | A boot-time script and unit. They build the composite USB gadget (serial **+** sound card). This gadget replaces `g_serial` when USB audio is installed. |
@@ -150,6 +150,17 @@ To update the installation, run `sudo ./install.sh` again. The script
 never replaces your configuration file. If you prefer manual steps:
 `install.sh` contains only the usual `install` and `systemctl` commands
 in the correct sequence. You can read the script.
+
+If the configuration still holds the placeholder MAC, the script lists
+the AirPods that are already paired with the Pi. Copy the address from
+that list into the configuration. The script never writes the address
+itself: you must make sure that it is the Bluetooth Classic address (see
+step 1).
+
+To remove the installation, run `sudo ./install.sh --uninstall`. This
+stops the service and removes the installed files. The configuration
+file stays; add `--purge` to remove it also. The USB gadget and audio
+units from the `setup-usb-*.sh` scripts are not touched.
 
 ### 4. Select a transport
 
@@ -391,7 +402,11 @@ $ systemctl status pods-head-tracker
 ## Cautions
 
 - **Only one L2CAP connection is possible at one time.** Stop the service
-  before you run the probe or the bridge manually.
+  before you run the probe or the bridge manually. For a manual run with
+  your usual settings, give the bridge the configuration file directly:
+  `sudo python3 /usr/local/bin/opentrack_bridge.py --config
+  /etc/pods-head-tracker.conf --verbose`. Command-line flags and
+  environment variables override the values from the file.
 - **`pkill -f opentrack_bridge` can kill your own SSH shell** if your
   command line contains that string. Use
   `pkill -9 -f '[o]pentrack_bridge'`.
@@ -404,8 +419,10 @@ $ systemctl status pods-head-tracker
   answer the other variant. Set `HT_START=both` in the configuration and
   restart the service. The bridge then sends the two variants alternately
   until data arrives. The journal line `stream started after start ...`
-  shows the variant that operates on your model; you can then set
-  `HT_START` to that variant (`alt` or `def`) permanently. The probe
+  shows the variant that operates on your model, and the bridge keeps
+  that variant until the next service restart -- reconnects do not
+  alternate again. A `hint:` line in the journal shows the value to set
+  as `HT_START` (`alt` or `def`) permanently. The probe
   (`airpods_ht_probe.py --variant both --burst full`) gives the same
   answer with more detail.
 - **Missing configuration:** If `/etc/pods-head-tracker.conf` does not
