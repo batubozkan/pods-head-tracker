@@ -7,8 +7,15 @@ on:
 jobs:
   python:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # The Pythons of Raspberry Pi OS Bullseye, Bookworm, and Trixie.
+        python-version: ["3.9", "3.11", "3.13"]
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
       - name: Byte-compile both scripts
         run: python3 -m py_compile opentrack_bridge.py airpods_ht_probe.py
       - name: Unit tests

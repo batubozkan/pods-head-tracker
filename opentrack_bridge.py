@@ -212,13 +212,19 @@ class CommandScanner:
         return False
 
 
-def connect_l2cap(mac):
+def _l2cap_socket():
+    s = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_L2CAP)
+    s.setsockopt(SOL_BLUETOOTH, BT_SECURITY, struct.pack("BB", BT_SECURITY_MEDIUM, 0))
+    return s
+
+
+def connect_l2cap(mac, sock_factory=_l2cap_socket, sleep=time.sleep):
     """Open the encrypted AACP L2CAP channel, retrying while the link
-    re-establishes from the stored bond."""
+    re-establishes from the stored bond. sock_factory and sleep only exist
+    as injection points for the tests -- no Bluetooth on the CI box."""
     last = None
     for _ in range(8):
-        s = socket.socket(socket.AF_BLUETOOTH, socket.SOCK_SEQPACKET, socket.BTPROTO_L2CAP)
-        s.setsockopt(SOL_BLUETOOTH, BT_SECURITY, struct.pack("BB", BT_SECURITY_MEDIUM, 0))
+        s = sock_factory()
         try:
             s.connect((mac, AACP_PSM))
             return s
@@ -231,7 +237,7 @@ def connect_l2cap(mac):
             # (SSH dies while the buds are away). Reconnect stays fast:
             # AirPods leaving the case page their bonded hosts themselves,
             # so the next attempt rides that link without paging at all.
-            time.sleep(10.0 if e.errno == 112 else 1.5)
+            sleep(10.0 if e.errno == 112 else 1.5)
     raise SystemExit(f"could not open L2CAP channel: {last}")
 
 
@@ -535,7 +541,10 @@ def format_status(state, battery=None):
 # Connect, start the stream, convert each sample, hand it to the output.
 # Reconnects from scratch whenever the Bluetooth link drops (e.g. the AirPods
 # go back in the case).
-def run(mac, output, recalib_secs, verbose, notifier, battery, starts=None):
+def run(mac, output, recalib_secs, verbose, notifier, battery, starts=None,
+        *, connect=connect_l2cap, clock=time.monotonic, sleep=time.sleep):
+    # connect/clock/sleep are injection points for the tests (fake socket,
+    # fake time); the defaults are the real thing.
     starts = starts or start_variants("alt")
     state = "starting"
 
@@ -547,27 +556,27 @@ def run(mac, output, recalib_secs, verbose, notifier, battery, starts=None):
 
     while True:
         set_status("connecting to AirPods")
-        s = connect_l2cap(mac)
+        s = connect(mac)
         print("L2CAP open -> streaming pitch/yaw", flush=True)
-        calib, neutral, last_calib = Calibrator(), None, time.monotonic()
+        calib, neutral, last_calib = Calibrator(), None, clock()
         in_ear, dry, start_i = None, False, 0
         try:
             # Inside the reconnect guard: the link can drop this early too
             # (buds straight back into the case), and that has to loop back
             # to a reconnect, not escape as an unhandled OSError.
             s.send(HANDSHAKE)
-            time.sleep(0.3)
+            sleep(0.3)
             s.send(REQUEST_NOTIFICATIONS)  # battery + ear-status pushes
             s.send(starts[start_i][1])
             s.settimeout(2)
-            last_ht = last_start = time.monotonic()
+            last_ht = last_start = clock()
             set_status("calibrating - hold still, face forward")
             while True:
                 try:
                     p = s.recv(2048)
                 except socket.timeout:
                     p = None
-                now = time.monotonic()
+                now = clock()
 
                 # Runtime re-center: SIGUSR1 or the serial RECENTER_CMD token.
                 if consume_recenter() or "recenter" in output.poll_events():
@@ -635,8 +644,8 @@ def run(mac, output, recalib_secs, verbose, notifier, battery, starts=None):
                     continue
 
                 # Optional periodic recalibration (drift correction).
-                if recalib_secs and (time.monotonic() - last_calib) >= recalib_secs:
-                    neutral, calib, last_calib = None, Calibrator(), time.monotonic()
+                if recalib_secs and (clock() - last_calib) >= recalib_secs:
+                    neutral, calib, last_calib = None, Calibrator(), clock()
                     print("recalibrating - hold still, face forward", flush=True)
                     set_status("recalibrating - hold still")
                     continue
@@ -655,7 +664,7 @@ def run(mac, output, recalib_secs, verbose, notifier, battery, starts=None):
                 s.close()
             except OSError:
                 pass
-            time.sleep(2)
+            sleep(2)
 
 
 # --- Configuration -----------------------------------------------------------
@@ -676,7 +685,7 @@ def env_num(name, default, cast):
         raise SystemExit(f"invalid {name}={raw!r} (check /etc/pods-head-tracker.conf)")
 
 
-if __name__ == "__main__":
+def main(argv=None):
     ap = argparse.ArgumentParser(
         description="AirPods -> OpenTrack head-tracking bridge",
         epilog="Defaults come from environment variables (AIRPODS_MAC, "
@@ -724,7 +733,7 @@ if __name__ == "__main__":
     ap.set_defaults(verbose=env("VERBOSE", "0").lower() in ("1", "true", "yes", "on"),
                     recenter_on_start=env("RECENTER_ON_START", "1").lower()
                     in ("1", "true", "yes", "on"))
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
 
     # Validated by hand, not argparse choices=, so bad values coming from the
     # config file (which bypass argparse) get the same clear error.
@@ -775,3 +784,7 @@ if __name__ == "__main__":
     except PermissionError:
         print("permission denied - run with sudo", file=sys.stderr)
         sys.exit(2)
+
+
+if __name__ == "__main__":
+    main()
