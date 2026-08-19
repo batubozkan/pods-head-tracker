@@ -8,6 +8,7 @@ confirm the sensor stream works before involving OpenTrack -- continuous
 """
 
 import argparse
+import csv
 import socket
 import struct
 import sys
@@ -51,6 +52,31 @@ def s16(p: bytes, off: int) -> int:
     return struct.unpack_from("<h", p, off)[0]
 
 
+class CsvLogger:
+    """One CSV row per sensor packet, unthrottled (the console keeps its
+    1-in-5 throttle). t is seconds since the first logged packet, so files
+    from separate runs line up at zero. An optional constant label column
+    tags the motion performed (still/yaw/pitch/roll) when several runs are
+    concatenated for analysis."""
+
+    def __init__(self, fh, label=None):
+        self.w = csv.writer(fh)
+        self.t0 = None
+        self.label = label
+        header = ["t", "o1", "o2", "o3", "h", "v"]
+        if label is not None:
+            header.append("label")
+        self.w.writerow(header)
+
+    def row(self, now, o1, o2, o3, h, v):
+        if self.t0 is None:
+            self.t0 = now
+        r = [f"{now - self.t0:.4f}", o1, o2, o3, h, v]
+        if self.label is not None:
+            r.append(self.label)
+        self.w.writerow(r)
+
+
 def connect(mac: str) -> socket.socket:
     print(f"connecting to {mac} PSM 0x{AACP_PSM:04X} ...", flush=True)
     last = None
@@ -76,8 +102,12 @@ def send_burst(s: socket.socket, burst: str, start_pkt: bytes):
     s.send(start_pkt); print(f"sent START ({len(start_pkt)}B)", flush=True)
 
 
-def run(mac, variant, burst, seconds):
+def run(mac, variant, burst, seconds, csv_path=None, label=None):
     variants = {"def": [START_DEF], "alt": [START_ALT], "both": [START_DEF, START_ALT]}[variant]
+    csv_fh = logger = None
+    if csv_path:
+        csv_fh = open(csv_path, "w", newline="")
+        logger = CsvLogger(csv_fh, label)
     s = connect(mac)
     s.settimeout(2.0)
     ht_count = 0
@@ -97,6 +127,8 @@ def run(mac, variant, burst, seconds):
                 ht_count += 1
                 h, v = s16(p, 51), s16(p, 53)
                 o1, o2, o3 = s16(p, 43), s16(p, 45), s16(p, 47)
+                if logger:
+                    logger.row(time.monotonic(), o1, o2, o3, h, v)
                 if ht_count % 5 == 1:  # throttle console
                     print(f"HT  h={h:6d} v={v:6d}   o=({o1:6d},{o2:6d},{o3:6d})   [{ht_count} total]",
                           flush=True)
@@ -115,6 +147,9 @@ def run(mac, variant, burst, seconds):
         if ht_count:
             break
     s.close()
+    if csv_fh:
+        csv_fh.close()
+        print(f"\nwrote {ht_count} rows to {csv_path}", flush=True)
     print(f"\nRESULT: {ht_count} head-tracking sensor packets received.", flush=True)
     if ht_count:
         print(">>> SUCCESS - the Pi/BlueZ platform gets head tracking. Bridge it next.", flush=True)
@@ -132,9 +167,17 @@ if __name__ == "__main__":
     ap.add_argument("--variant", choices=["def", "alt", "both"], default="alt")
     ap.add_argument("--burst", choices=["minimal", "full"], default="minimal")
     ap.add_argument("--seconds", type=int, default=15)
+    ap.add_argument("--csv", metavar="PATH",
+                    help="also write every sensor packet to PATH as CSV "
+                         "(t,o1,o2,o3,h,v) for offline analysis -- e.g. one "
+                         "run per pure head motion to find which fields "
+                         "carry roll")
+    ap.add_argument("--label", default=None,
+                    help="constant label column for --csv rows (e.g. still, "
+                         "yaw, pitch, roll)")
     a = ap.parse_args()
     try:
-        sys.exit(run(a.mac, a.variant, a.burst, a.seconds))
+        sys.exit(run(a.mac, a.variant, a.burst, a.seconds, a.csv, a.label))
     except PermissionError:
         print("permission denied opening L2CAP socket - try: sudo python3 ...", file=sys.stderr)
         sys.exit(2)
