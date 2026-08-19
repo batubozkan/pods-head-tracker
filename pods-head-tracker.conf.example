@@ -22,6 +22,15 @@ UDP_PORT=4242
 # USB gadget serial device, created by setup-usb-serial.sh. Leave as-is.
 SERIAL_DEV=/dev/ttyGS0
 
+# --- head-tracking start command ---
+# Which START packet begins the sensor stream: alt (the default; confirmed
+# on AirPods 4 ANC), def (the LibrePods variant; some other models need
+# it), or both (send alt and def alternately until data arrives).
+# Set "both" if the journal shows "no data - re-sent start" continuously
+# while the buds are in your ears. The journal then shows which variant
+# your model answered ("stream started after start ...").
+#HT_START=alt
+
 # --- USB audio (optional; installed by setup-usb-audio.sh) ---
 # The audio forwarder reuses AIRPODS_MAC above -- nothing extra is required.
 # 0 = head tracking only: the audio services stay installed but idle.

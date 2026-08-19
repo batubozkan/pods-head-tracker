@@ -380,6 +380,16 @@ $ systemctl status pods-head-tracker
 - **`Host is down` (errno 112)** in the journal means only that the
   AirPods are not available (in the case, or out of the ear). The service
   tries again.
+- **No data with the buds in your ears:** the journal shows
+  `no data - re-sent start` continuously, but the battery and ear reports
+  are correct. Two START packet variants exist, and some models only
+  answer the other variant. Set `HT_START=both` in the configuration and
+  restart the service. The bridge then sends the two variants alternately
+  until data arrives. The journal line `stream started after start ...`
+  shows the variant that operates on your model; you can then set
+  `HT_START` to that variant (`alt` or `def`) permanently. The probe
+  (`airpods_ht_probe.py --variant both --burst full`) gives the same
+  answer with more detail.
 - **Missing configuration:** If `/etc/pods-head-tracker.conf` does not
   exist, the service fails immediately. `systemctl status` shows a clear
   message. This is intentional.

@@ -57,6 +57,26 @@ class IsHtTest(unittest.TestCase):
         self.assertFalse(bridge.is_ht(bytes.fromhex("0400040006000001")))
 
 
+class StartVariantsTest(unittest.TestCase):
+    def test_single_variant_modes(self):
+        self.assertEqual(bridge.start_variants("alt"),
+                         [("ALT", bridge.START_ALT)])
+        self.assertEqual(bridge.start_variants("def"),
+                         [("DEF", bridge.START_DEF)])
+
+    def test_both_keeps_alt_first(self):
+        # Protocol constraint, not style: DEF sent before ALT contaminates
+        # the ALT stream (see the note in airpods_ht_probe.py).
+        self.assertEqual([name for name, _ in bridge.start_variants("both")],
+                         ["ALT", "DEF"])
+
+    def test_start_packets_are_not_sensor_packets(self):
+        # Both START packets begin with HT_PREFIX; is_ht() must still
+        # reject them so an echoed command can never enter the math.
+        self.assertFalse(bridge.is_ht(bridge.START_ALT))
+        self.assertFalse(bridge.is_ht(bridge.START_DEF))
+
+
 class CalibratorTest(unittest.TestCase):
     def test_still_head_calibrates_in_one_batch(self):
         c = bridge.Calibrator()

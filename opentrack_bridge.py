@@ -27,11 +27,26 @@ AACP_PSM = 0x1001
 SOL_BLUETOOTH, BT_SECURITY, BT_SECURITY_MEDIUM = 274, 4, 2
 
 HANDSHAKE = bytes.fromhex("00000400010002000000000000000000")
-# ALT start (the streaming variant confirmed on hardware).
+# Two START variants exist; which one begins the sensor stream depends on
+# the AirPods model/firmware. ALT is confirmed on AirPods 4 (ANC), DEF is
+# the LibrePods packets.h variant. HT_START selects one, or "both" to
+# alternate until data arrives.
 START_ALT = bytes([0x04, 0x00, 0x04, 0x00, 0x17, 0x00, 0x00, 0x00, 0x10, 0x00,
                    0x0F, 0x00, 0x08, 0x73, 0x42, 0x0B, 0x08, 0x10, 0x10, 0x02,
                    0x1A, 0x05, 0x01, 0x40, 0x9C, 0x00, 0x00])
+START_DEF = bytes([0x04, 0x00, 0x04, 0x00, 0x17, 0x00, 0x00, 0x00, 0x10, 0x00,
+                   0x10, 0x00, 0x08, 0xA1, 0x02, 0x42, 0x0B, 0x08, 0x0E, 0x10,
+                   0x02, 0x1A, 0x05, 0x01, 0x40, 0x9C, 0x00, 0x00])
 HT_PREFIX = bytes([0x04, 0x00, 0x04, 0x00, 0x17, 0x00, 0x00, 0x00, 0x10, 0x00])
+
+
+def start_variants(mode):
+    """(name, packet) list for an HT_START mode. "both" must keep ALT
+    first: DEF sent before ALT makes the buds emit a different packet
+    family that contaminates the ALT stream (see airpods_ht_probe.py)."""
+    return {"alt": [("ALT", START_ALT)],
+            "def": [("DEF", START_DEF)],
+            "both": [("ALT", START_ALT), ("DEF", START_DEF)]}[mode]
 
 # Battery / ear-status notifications (formats from LibrePods). The buds push
 # them on the same L2CAP channel once REQUEST_NOTIFICATIONS is sent (any time
@@ -520,7 +535,8 @@ def format_status(state, battery=None):
 # Connect, start the stream, convert each sample, hand it to the output.
 # Reconnects from scratch whenever the Bluetooth link drops (e.g. the AirPods
 # go back in the case).
-def run(mac, output, recalib_secs, verbose, notifier, battery):
+def run(mac, output, recalib_secs, verbose, notifier, battery, starts=None):
+    starts = starts or start_variants("alt")
     state = "starting"
 
     def set_status(new=None):
@@ -534,7 +550,7 @@ def run(mac, output, recalib_secs, verbose, notifier, battery):
         s = connect_l2cap(mac)
         print("L2CAP open -> streaming pitch/yaw", flush=True)
         calib, neutral, last_calib = Calibrator(), None, time.monotonic()
-        in_ear, dry = None, False
+        in_ear, dry, start_i = None, False, 0
         try:
             # Inside the reconnect guard: the link can drop this early too
             # (buds straight back into the case), and that has to loop back
@@ -542,7 +558,7 @@ def run(mac, output, recalib_secs, verbose, notifier, battery):
             s.send(HANDSHAKE)
             time.sleep(0.3)
             s.send(REQUEST_NOTIFICATIONS)  # battery + ear-status pushes
-            s.send(START_ALT)
+            s.send(starts[start_i][1])
             s.settimeout(2)
             last_ht = last_start = time.monotonic()
             set_status("calibrating - hold still, face forward")
@@ -571,10 +587,12 @@ def run(mac, output, recalib_secs, verbose, notifier, battery):
                 # a missed ear event can only delay the start, never block it.
                 if now - last_ht >= 4.0 and \
                         now - last_start >= (30.0 if in_ear is False else 4.0):
-                    s.send(START_ALT)
+                    start_i = (start_i + 1) % len(starts)
+                    s.send(starts[start_i][1])
                     last_start = now
                     dry = True
-                    print("no data - re-sent start (buds in-ear?)", flush=True)
+                    print(f"no data - re-sent start {starts[start_i][0]} "
+                          "(buds in-ear?)", flush=True)
                     set_status("idle - waiting for buds in-ear")
 
                 if p is None:
@@ -596,6 +614,12 @@ def run(mac, output, recalib_secs, verbose, notifier, battery):
                 last_ht = now
                 if dry:
                     dry = False
+                    if len(starts) > 1:
+                        # With HT_START=both the journal must show which
+                        # variant this model answered -- that is the whole
+                        # point of the mode.
+                        print(f"stream started after start {starts[start_i][0]}",
+                              flush=True)
                     set_status("streaming" if neutral is not None
                                else "calibrating - hold still, face forward")
                 # Orientation triple sits at offsets 43/45/47; only the two
@@ -636,8 +660,8 @@ def run(mac, output, recalib_secs, verbose, notifier, battery):
 
 # --- Configuration -----------------------------------------------------------
 # CLI arguments override environment variables (AIRPODS_MAC, TRANSPORT,
-# UDP_HOST, UDP_PORT, SERIAL_DEV, RECALIBRATE_SECS, VERBOSE); the systemd
-# service supplies the env from /etc/pods-head-tracker.conf via
+# UDP_HOST, UDP_PORT, SERIAL_DEV, HT_START, RECALIBRATE_SECS, VERBOSE);
+# the systemd service supplies the env from /etc/pods-head-tracker.conf via
 # EnvironmentFile=, so its ExecStart needs no arguments.
 def env(name, default=None):
     v = os.environ.get(name, "").strip()
@@ -656,9 +680,9 @@ if __name__ == "__main__":
     ap = argparse.ArgumentParser(
         description="AirPods -> OpenTrack head-tracking bridge",
         epilog="Defaults come from environment variables (AIRPODS_MAC, "
-               "TRANSPORT, UDP_HOST, UDP_PORT, SERIAL_DEV, RECALIBRATE_SECS, "
-               "VERBOSE); the systemd service loads them from "
-               "/etc/pods-head-tracker.conf.")
+               "TRANSPORT, UDP_HOST, UDP_PORT, SERIAL_DEV, HT_START, "
+               "RECALIBRATE_SECS, VERBOSE); the systemd service loads them "
+               "from /etc/pods-head-tracker.conf.")
     ap.add_argument("mac", nargs="?", default=env("AIRPODS_MAC"),
                     help="AirPods Bluetooth Classic MAC [env AIRPODS_MAC]")
     ap.add_argument("pc_ip", nargs="?", default=env("UDP_HOST"),
@@ -669,6 +693,11 @@ if __name__ == "__main__":
                     help="OpenTrack FreePIE UDP port [env UDP_PORT] (default: 4242)")
     ap.add_argument("--serial-dev", default=env("SERIAL_DEV", "/dev/ttyGS0"),
                     help="USB gadget serial device [env SERIAL_DEV] (default: /dev/ttyGS0)")
+    ap.add_argument("--ht-start", default=env("HT_START", "alt"),
+                    help="head-tracking START packet: alt, def, or both "
+                         "(alternate until data arrives; use if the stream "
+                         "never starts on your model) [env HT_START] "
+                         "(default: alt)")
     ap.add_argument("--recalibrate-secs", type=float,
                     default=env_num("RECALIBRATE_SECS", "0", float),
                     help="periodically re-zero the neutral pose (0 = never) [env RECALIBRATE_SECS]")
@@ -701,6 +730,8 @@ if __name__ == "__main__":
     # config file (which bypass argparse) get the same clear error.
     if a.transport not in ("udp", "serial", "both"):
         ap.error(f"invalid transport {a.transport!r} - use udp, serial, or both")
+    if a.ht_start not in ("alt", "def", "both"):
+        ap.error(f"invalid HT_START {a.ht_start!r} - use alt, def, or both")
     if not 1 <= a.port <= 65535:
         ap.error(f"invalid UDP_PORT {a.port} - must be 1-65535")
     if not a.mac:
@@ -737,7 +768,8 @@ if __name__ == "__main__":
 
     try:
         run(a.mac, out, a.recalibrate_secs, a.verbose,
-            SdNotifier(), BatteryReporter(a.battery_log_secs, a.battery_warn_pct))
+            SdNotifier(), BatteryReporter(a.battery_log_secs, a.battery_warn_pct),
+            start_variants(a.ht_start))
     except KeyboardInterrupt:
         pass
     except PermissionError:
