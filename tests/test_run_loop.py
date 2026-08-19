@@ -298,6 +298,50 @@ class CalibrationAndMathTest(RunLoopCase):
         self.assertIn("battery L 99%", " ".join(self.notifier.statuses))
 
 
+class EarPauseTest(RunLoopCase):
+    def test_ear_out_freezes_output_and_holds_the_pose(self):
+        self.run_bridge(STILL + [ht(o2=1000, o3=-500),   # one real sample
+                                 EAR_OUT,
+                                 ht(o2=5000, o3=3000),   # removal garbage
+                                 socket.timeout, _Stop])
+        self.assertIn("paused - buds out of ear", " ".join(self.notifier.statuses))
+        # The garbage sample was swallowed; every send is the held pose.
+        self.assertEqual(len(self.out.sent), 3)  # 1 real + 2 keepalives
+        for yaw, pitch, _ in self.out.sent:
+            self.assertAlmostEqual(yaw, 0.0, places=3)
+            self.assertAlmostEqual(pitch, 0.0, places=3)
+
+    def test_ear_out_before_calibration_sends_nothing(self):
+        self.run_bridge([EAR_OUT, socket.timeout, _Stop])
+        self.assertEqual(self.out.sent, [])
+
+    def test_ear_return_recenters_by_default(self):
+        self.run_bridge(STILL + [EAR_OUT, EAR_IN]
+                        + [ht(o2=2000, o3=500)] * (bridge.CALIB_N + 1) + [_Stop])
+        self.assertIn("buds back in ear - recentering", self.log)
+        self.assertEqual(self.log.count("calibrated neutral="), 2)
+        yaw, pitch, _ = self.out.sent[-1]  # the new neutral applies
+        self.assertAlmostEqual(yaw, 0.0, places=3)
+        self.assertAlmostEqual(pitch, 0.0, places=3)
+
+    def test_ear_pause_disabled_keeps_streaming(self):
+        self.run_bridge(STILL + [EAR_OUT, ht(o2=1000 + 640, o3=-500 + 320),
+                                 _Stop],
+                        ear_pause=False)
+        self.assertNotIn("paused", " ".join(self.notifier.statuses))
+        pitch = self.out.sent[-1][1]  # the sample still converts and sends
+        self.assertAlmostEqual(pitch, (640 + 320) / 2 / bridge.FULL_SCALE * 180.0,
+                               places=4)
+
+    def test_ear_recenter_disabled_keeps_the_old_neutral(self):
+        self.run_bridge(STILL + [EAR_OUT, EAR_IN, ht(o2=1000, o3=-500), _Stop],
+                        ear_recenter=False)
+        self.assertEqual(self.log.count("calibrated neutral="), 1)
+        yaw, pitch, _ = self.out.sent[-1]  # old neutral still zeroes the pose
+        self.assertAlmostEqual(yaw, 0.0, places=3)
+        self.assertAlmostEqual(pitch, 0.0, places=3)
+
+
 class ConnectL2capTest(unittest.TestCase):
     class _Sock:
         def __init__(self, err=None):
@@ -405,6 +449,16 @@ class MainArgparseTest(unittest.TestCase):
                                   "UDP_HOST": "127.0.0.1", "HT_START": "both"})
         starts = run.call_args[0][6]
         self.assertEqual([n for n, _ in starts], ["ALT", "DEF"])
+
+    def test_ear_knobs_reach_run(self):
+        run = self._main([self.MAC, "127.0.0.1"])
+        self.assertEqual(run.call_args[0][7:9], (True, True))
+        run = self._main([self.MAC, "127.0.0.1", "--no-ear-pause",
+                          "--no-ear-recenter"])
+        self.assertEqual(run.call_args[0][7:9], (False, False))
+        run = self._main([], env={"AIRPODS_MAC": self.MAC,
+                                  "UDP_HOST": "127.0.0.1", "EAR_PAUSE": "0"})
+        self.assertEqual(run.call_args[0][7:9], (False, True))
 
 
 if __name__ == "__main__":

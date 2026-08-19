@@ -542,6 +542,7 @@ def format_status(state, battery=None):
 # Reconnects from scratch whenever the Bluetooth link drops (e.g. the AirPods
 # go back in the case).
 def run(mac, output, recalib_secs, verbose, notifier, battery, starts=None,
+        ear_pause=True, ear_recenter=True,
         *, connect=connect_l2cap, clock=time.monotonic, sleep=time.sleep):
     # connect/clock/sleep are injection points for the tests (fake socket,
     # fake time); the defaults are the real thing.
@@ -560,6 +561,7 @@ def run(mac, output, recalib_secs, verbose, notifier, battery, starts=None,
         print("L2CAP open -> streaming pitch/yaw", flush=True)
         calib, neutral, last_calib = Calibrator(), None, clock()
         in_ear, dry, start_i = None, False, 0
+        held, paused = None, False  # last sent pose; ear-out freeze
         try:
             # Inside the reconnect guard: the link can drop this early too
             # (buds straight back into the case), and that has to loop back
@@ -604,6 +606,13 @@ def run(mac, output, recalib_secs, verbose, notifier, battery, starts=None,
                           "(buds in-ear?)", flush=True)
                     set_status("idle - waiting for buds in-ear")
 
+                # While paused the last pose is re-sent at loop-wake cadence
+                # (bounded by the 2 s recv timeout): both transports then
+                # behave exactly like on stream silence -- the view holds --
+                # and the serial output's resume detection stays fed.
+                if paused and held is not None:
+                    output.send(*held)
+
                 if p is None:
                     continue
                 if not is_ht(p):
@@ -616,9 +625,30 @@ def run(mac, output, recalib_secs, verbose, notifier, battery, starts=None,
                     ear = decode_ear(p)
                     if ear is not None:
                         was, in_ear = in_ear, 0x00 in ear
-                        if was is not in_ear:
-                            print("buds in ear" if in_ear
-                                  else "buds out of ear (case?)", flush=True)
+                        # Freeze only when NO bud is in an ear: the bytes are
+                        # primary/secondary (roles swap), so "any byte 0x00"
+                        # is the only safe predicate, and one bud still in
+                        # keeps streaming valid data.
+                        paused = ear_pause and in_ear is False
+                        if was is not in_ear and not in_ear:
+                            print("buds out of ear (case?)", flush=True)
+                            if paused:
+                                set_status("paused - buds out of ear")
+                        elif was is False and in_ear:
+                            # Out -> in: re-seating a bud moves the sensor on
+                            # the head, so a pre-removal neutral is stale.
+                            if ear_recenter and neutral is not None:
+                                neutral, calib, last_calib = None, Calibrator(), now
+                                print("buds back in ear - recentering, face "
+                                      "forward and hold still", flush=True)
+                                set_status("recalibrating - hold still")
+                            else:
+                                print("buds in ear", flush=True)
+                                set_status("streaming" if neutral is not None
+                                           else "calibrating - hold still, "
+                                                "face forward")
+                        elif was is not in_ear:
+                            print("buds in ear", flush=True)
                     continue
                 last_ht = now
                 if dry:
@@ -631,6 +661,12 @@ def run(mac, output, recalib_secs, verbose, notifier, battery, starts=None,
                               flush=True)
                     set_status("streaming" if neutral is not None
                                else "calibrating - hold still, face forward")
+                if paused:
+                    # Sensor data during the removal transition is garbage
+                    # (the pull itself is motion). It must not reach the
+                    # calibrator or the outputs -- but it did update last_ht
+                    # above, so the START watchdog stays quiet.
+                    continue
                 # Orientation triple sits at offsets 43/45/47; only the two
                 # combined axes at 45/47 enter the pitch/yaw math.
                 o2, o3 = s16(p, 45), s16(p, 47)
@@ -654,7 +690,8 @@ def run(mac, output, recalib_secs, verbose, notifier, battery, starts=None,
                 o3n = wrap_s16(o3 - neutral[1])
                 pitch = (o2n + o3n) / 2 / FULL_SCALE * 180.0  # degrees
                 yaw = (o2n - o3n) / 2 / FULL_SCALE * 180.0
-                output.send(yaw, pitch, 0.0)  # roll not derived
+                held = (yaw, pitch, 0.0)  # roll not derived
+                output.send(*held)
                 if verbose:
                     print(f"yaw={yaw:7.2f}  pitch={pitch:7.2f}", flush=True)
         except OSError as e:
@@ -718,6 +755,13 @@ def main(argv=None):
                     action="store_false",
                     help="do not re-center automatically when the PC starts "
                          "reading the serial port [env RECENTER_ON_START]")
+    ap.add_argument("--no-ear-pause", dest="ear_pause", action="store_false",
+                    help="keep converting sensor data even while no bud is "
+                         "in an ear [env EAR_PAUSE]")
+    ap.add_argument("--no-ear-recenter", dest="ear_recenter",
+                    action="store_false",
+                    help="do not re-capture the neutral pose when the buds "
+                         "return to the ears [env EAR_RECENTER]")
     ap.add_argument("--battery-log-secs", type=float,
                     default=env_num("BATTERY_LOG_SECS", "900", float),
                     help="battery heartbeat interval; changes always log, "
@@ -730,9 +774,13 @@ def main(argv=None):
                     help="log every sample [env VERBOSE]")
     ap.add_argument("--no-verbose", dest="verbose", action="store_false",
                     help="override VERBOSE=1 from the config")
-    ap.set_defaults(verbose=env("VERBOSE", "0").lower() in ("1", "true", "yes", "on"),
-                    recenter_on_start=env("RECENTER_ON_START", "1").lower()
-                    in ("1", "true", "yes", "on"))
+    def env_flag(name, default):
+        return env(name, default).lower() in ("1", "true", "yes", "on")
+
+    ap.set_defaults(verbose=env_flag("VERBOSE", "0"),
+                    recenter_on_start=env_flag("RECENTER_ON_START", "1"),
+                    ear_pause=env_flag("EAR_PAUSE", "1"),
+                    ear_recenter=env_flag("EAR_RECENTER", "1"))
     a = ap.parse_args(argv)
 
     # Validated by hand, not argparse choices=, so bad values coming from the
@@ -778,7 +826,7 @@ def main(argv=None):
     try:
         run(a.mac, out, a.recalibrate_secs, a.verbose,
             SdNotifier(), BatteryReporter(a.battery_log_secs, a.battery_warn_pct),
-            start_variants(a.ht_start))
+            start_variants(a.ht_start), a.ear_pause, a.ear_recenter)
     except KeyboardInterrupt:
         pass
     except PermissionError:

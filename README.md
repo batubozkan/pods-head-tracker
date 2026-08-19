@@ -312,10 +312,28 @@ systemctl status pods-head-tracker              # state + battery summary
 sudo journalctl -u pods-head-tracker -f         # live log
 ```
 
+### When you remove the AirPods
+
+When no bud is in an ear, the bridge holds the last position. The view in
+the game does not move while the AirPods are out. This is important: the
+removal itself is head movement, and without the hold this movement goes
+to the game. The status shows `paused - buds out of ear`.
+
+When you put the AirPods in again, the bridge calibrates the neutral
+position again. A bud does not sit in the exact same position after each
+insertion; thus the old neutral position is not correct. Look forward
+when you put the AirPods in.
+
+Two configuration values control this function: `EAR_PAUSE=0` disables
+the hold, and `EAR_RECENTER=0` keeps the old neutral position after an
+insertion.
+
 ### Re-centering (set the forward position again)
 
-On the **serial transport**, re-centering is usually automatic. The
-bridge re-centers **each time you click Start in OpenTrack**. (The bridge
+Re-centering is usually automatic. The bridge re-centers **each time you
+put the AirPods back in your ears** (see "When you remove the AirPods"
+above). On the **serial transport**, the bridge also re-centers **each
+time you click Start in OpenTrack**. (The bridge
 detects that the PC reads the COM port again after a stop.) Thus sit
 straight and look forward when you click Start. A stop shorter than
 approximately 3 seconds does not cause a re-center. Thus a short PC
