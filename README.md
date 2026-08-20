@@ -413,6 +413,19 @@ $ systemctl status pods-head-tracker
 - **`Host is down` (errno 112)** in the journal means only that the
   AirPods are not available (in the case, or out of the ear). The service
   tries again.
+- **No COM port on the PC** (serial transport): the Pi does not have a
+  data connection to the PC. To confirm this, run this command on the
+  Pi: `cat /sys/class/udc/*/state`. The output `configured` means that
+  the PC found the gadget; then examine the PC side (Device Manager).
+  The output `not attached` means that no data connection exists. Then
+  do these checks:
+  1. Make sure that the cable is in the inner **USB** port of the Pi
+     Zero, not in the **PWR** port. The PWR port supplies power only:
+     the Pi starts, but the PC cannot see it.
+  2. Make sure that the cable is a data cable. Many micro-USB cables
+     carry only power.
+  One cable in the USB port is sufficient. The PC port also supplies
+  power to the Pi.
 - **No data with the buds in your ears:** the journal shows
   `no data - re-sent start` continuously, but the battery and ear reports
   are correct. Two START packet variants exist, and some models only
