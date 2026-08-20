@@ -448,21 +448,32 @@ $ systemctl status pods-head-tracker
 
 ## Roll (optional)
 
-Set `ROLL=1` in the configuration to send the roll axis (head tilt, ear
-to shoulder) together with yaw and pitch. Positive roll is the right ear
-toward the right shoulder; if your game shows the opposite direction,
-invert the roll axis in the Output mapping of OpenTrack.
+Set `ROLL=1` in the configuration to send the roll axis together with
+yaw and pitch. Roll is the tilt of the head, ear to shoulder. Roll is
+off by default. Positive roll is the right ear toward the right
+shoulder. If your game shows the opposite direction, invert the roll
+axis in the Output mapping of OpenTrack.
 
-The formula comes from measurements on AirPods 4 (ANC): the packet field
-`o1` carries pitch+roll, and the pitch pair carries pitch−roll; the
-half-difference isolates roll. Measured quality: 0.2° of noise with a
-still head, 3–4° of crosstalk during pure yaw or pitch sweeps, and a
-correct ±40° response to ear-to-shoulder tilts.
+We found the roll formula with measurements on AirPods 4 (ANC):
 
-Roll is off by default. On a model other than AirPods 4, verify the
-mapping one time before you trust it: record one CSV file for each pure
-head motion with the probe, and make sure that the quantity
-`o1 − (o2+o3)/2` moves only in `roll.csv`:
+- The packet field `o1` contains the sum of pitch and roll.
+- The pitch pair `(o2+o3)/2` contains the difference of pitch and roll.
+- Half of the difference between the two values is the roll angle.
+
+The measurements show this quality:
+
+- 0.2° of noise when the head is still.
+- 3–4° of unwanted roll during pure yaw or pitch movement.
+- A correct ±40° response to ear-to-shoulder tilts.
+- No drift: the roll value goes back to zero after the movement.
+
+The measurements are from AirPods 4 only. On a different model, examine
+the mapping one time before you use it:
+
+1. Record one CSV file for each pure head motion. Use the commands
+   below.
+2. Make sure that the quantity `o1 − (o2+o3)/2` moves only in
+   `roll.csv`.
 
 ```bash
 sudo systemctl stop pods-head-tracker
