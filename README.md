@@ -433,26 +433,34 @@ $ systemctl status pods-head-tracker
   `AUDIO_LATENCY_MS`, and use `TRANSPORT=serial` to keep Wi-Fi off the
   shared antenna.
 
+## Roll (optional)
+
+Set `ROLL=1` in the configuration to send the roll axis (head tilt, ear
+to shoulder) together with yaw and pitch. Positive roll is the right ear
+toward the right shoulder; if your game shows the opposite direction,
+invert the roll axis in the Output mapping of OpenTrack.
+
+The formula comes from measurements on AirPods 4 (ANC): the packet field
+`o1` carries pitch+roll, and the pitch pair carries pitch−roll; the
+half-difference isolates roll. Measured quality: 0.2° of noise with a
+still head, 3–4° of crosstalk during pure yaw or pitch sweeps, and a
+correct ±40° response to ear-to-shoulder tilts.
+
+Roll is off by default. On a model other than AirPods 4, verify the
+mapping one time before you trust it: record one CSV file for each pure
+head motion with the probe, and make sure that the quantity
+`o1 − (o2+o3)/2` moves only in `roll.csv`:
+
+```bash
+sudo systemctl stop pods-head-tracker
+sudo python3 /usr/local/bin/airpods_ht_probe.py <MAC> --seconds 30 --csv still.csv   # hold still
+sudo python3 /usr/local/bin/airpods_ht_probe.py <MAC> --seconds 30 --csv yaw.csv     # turn left/right only
+sudo python3 /usr/local/bin/airpods_ht_probe.py <MAC> --seconds 30 --csv pitch.csv   # nod up/down only
+sudo python3 /usr/local/bin/airpods_ht_probe.py <MAC> --seconds 30 --csv roll.csv    # tilt ear-to-shoulder only
+sudo systemctl start pods-head-tracker
+```
+
 ## Known limitations
-
-- **Yaw and pitch only.** The confirmed mathematics cannot derive roll
-  from the orientation values of the AirPods. The bridge sends roll as 0
-  by default. An **experimental** `ROLL=1` option maps the unused third
-  orientation field to roll, but this mapping is not confirmed on
-  hardware. To examine it on your model, record one CSV file for each
-  pure head motion with the probe, and compare which columns move:
-
-  ```bash
-  sudo systemctl stop pods-head-tracker
-  sudo python3 /usr/local/bin/airpods_ht_probe.py <MAC> --seconds 30 --csv still.csv   # hold still
-  sudo python3 /usr/local/bin/airpods_ht_probe.py <MAC> --seconds 30 --csv yaw.csv     # turn left/right only
-  sudo python3 /usr/local/bin/airpods_ht_probe.py <MAC> --seconds 30 --csv pitch.csv   # nod up/down only
-  sudo python3 /usr/local/bin/airpods_ht_probe.py <MAC> --seconds 30 --csv roll.csv    # tilt ear-to-shoulder only
-  sudo systemctl start pods-head-tracker
-  ```
-
-  If `o1` moves in `roll.csv` and stays still in the other files, the
-  `ROLL=1` mapping is correct for your model.
 - One pair of AirPods for each Pi. The bridge owns the single AACP
   channel.
 

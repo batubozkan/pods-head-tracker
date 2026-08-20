@@ -61,10 +61,10 @@ RECALIBRATE_SECS=0
 # the Send box). Matched as raw bytes in the serial stream; empty = off.
 #RECENTER_CMD=RECENTER
 
-# --- roll (EXPERIMENTAL) ---
-# 1 = derive roll from the third orientation field. This mapping is not
-# confirmed on hardware yet -- see the roll section of the README before
-# you enable it. 0 = roll is always sent as 0 (the safe default).
+# --- roll ---
+# 1 = derive and send the roll axis (head tilt, ear to shoulder).
+# Confirmed on AirPods 4 (ANC). On another model, verify it one time with
+# the probe protocol in the README's roll section. 0 = roll is sent as 0.
 #ROLL=0
 
 # --- ear detection ---

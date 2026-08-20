@@ -313,11 +313,23 @@ class CalibrationAndMathTest(RunLoopCase):
         self.run_bridge(STILL + [ht(o1=5000, o2=1000, o3=-500), _Stop])
         self.assertEqual(self.out.sent[-1][2], 0.0)
 
-    def test_roll_enabled_maps_o1_like_the_other_axes(self):
+    def test_roll_enabled_derives_the_half_difference(self):
+        # roll = (o1n - (o2n+o3n)/2) / 2, confirmed on AirPods 4 hardware.
         self.run_bridge(STILL + [ht(o1=320, o2=1000, o3=-500), _Stop],
                         roll_axis=True)
         roll = self.out.sent[-1][2]
-        self.assertAlmostEqual(roll, 320 / bridge.FULL_SCALE * 180.0, places=4)
+        self.assertAlmostEqual(roll, 320 / 2 / bridge.FULL_SCALE * 180.0,
+                               places=4)
+
+    def test_pure_pitch_produces_no_roll(self):
+        # o1 and (o2+o3)/2 both carry pitch; the roll formula cancels it.
+        self.run_bridge(STILL + [ht(o1=640, o2=1000 + 640, o3=-500 + 640),
+                                 _Stop],
+                        roll_axis=True)
+        yaw, pitch, roll = self.out.sent[-1]
+        self.assertAlmostEqual(roll, 0.0, places=4)
+        self.assertAlmostEqual(pitch, 640 / bridge.FULL_SCALE * 180.0,
+                               places=4)
 
     def test_roll_uses_its_own_calibrated_neutral(self):
         still = [ht(o1=700, o2=1000, o3=-500)] * bridge.CALIB_N

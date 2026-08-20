@@ -703,10 +703,14 @@ def run(mac, output, recalib_secs, verbose, notifier, battery, starts=None,
                 o3n = wrap_s16(o3 - neutral[2])
                 pitch = (o2n + o3n) / 2 / FULL_SCALE * 180.0  # degrees
                 yaw = (o2n - o3n) / 2 / FULL_SCALE * 180.0
-                # Placeholder roll formula (o1 scaled like the other axes),
-                # off by default: which field really carries roll is still
-                # unconfirmed -- the probe's --csv protocol answers that.
-                roll = o1n / FULL_SCALE * 180.0 if roll_axis else 0.0
+                # Roll, confirmed on hardware (AirPods 4 ANC, probe --csv
+                # protocol, 2026-08-21): o1 carries pitch+roll while
+                # (o2+o3)/2 carries pitch-roll, so the half-difference
+                # isolates roll. Measured: ~0.2 deg std while still, 3-4 deg
+                # during pure yaw/pitch sweeps, +/-40 deg on ear-to-shoulder
+                # tilts. Positive = right ear toward right shoulder.
+                roll = ((o1n - (o2n + o3n) / 2) / 2 / FULL_SCALE * 180.0
+                        if roll_axis else 0.0)
                 held = (yaw, pitch, roll)
                 output.send(*held)
                 if verbose:
@@ -827,9 +831,9 @@ def main(argv=None):
                     help="do not re-capture the neutral pose when the buds "
                          "return to the ears [env EAR_RECENTER]")
     ap.add_argument("--roll", dest="roll_axis", action="store_true",
-                    help="EXPERIMENTAL: derive roll from the third "
-                         "orientation field; unconfirmed mapping, see the "
-                         "README [env ROLL]")
+                    help="derive and send roll (confirmed on AirPods 4; "
+                         "verify once on other models, see README) "
+                         "[env ROLL]")
     ap.add_argument("--no-roll", dest="roll_axis", action="store_false",
                     help="override ROLL=1 from the config")
     ap.add_argument("--battery-log-secs", type=float,
